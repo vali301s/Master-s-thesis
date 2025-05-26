@@ -1,0 +1,575 @@
+---
+title: "Centroid_dist_EMBO_optPC_malignant"
+output: html_document
+date: "2024-10-16"
+---
+
+```{r setup, include=FALSE}
+knitr::knit_global()
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r load_libraries, include=FALSE}
+# Load required package
+library(Seurat)
+library(ggplot2)
+library(ggpmisc)
+library(caret)
+library(ggpubr)
+library(multcomp)
+
+# set seed
+set.seed(43)
+
+
+```
+
+```{r load_datasets, include=FALSE}
+# load datasets
+SeuratObject_NormEpiSub <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Pal_GSEA/SeuratObject_NormEpiSub.rds")
+SeuratObject_ERTotalTum <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Data_Pal2021_Breast/Seu_Pal_ER.rds")
+SeuratObject_HER2Tum <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Data_Pal2021_Breast/Seu_Pal_HER2.rds")
+SeuratObject_TNBCTum <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Data_Pal2021_Breast/Seu_Pal_TNBC.rds")
+
+```
+
+```{r QC}
+### Normal
+# filter
+SeuratObject_NormEpiSub <- subset(SeuratObject_NormEpiSub, subset = nFeature_RNA > 250)
+table(SeuratObject_NormEpiSub@meta.data[["level1_global"]], SeuratObject_NormEpiSub@meta.data[["patient_id"]])
+
+# remove bad patient
+SeuratObject_NormEpiSub <- subset(SeuratObject_NormEpiSub, subset = patient_id != "N-MH0064-Epi")
+
+
+## subset normal into 3 subpopulations
+SeuratObject_Norm_B <- subset(SeuratObject_NormEpiSub, subset = level1_global_new == "Basal")
+SeuratObject_Norm_LP <- subset(SeuratObject_NormEpiSub, subset = level1_global_new == "LP")
+SeuratObject_Norm_HR <- subset(SeuratObject_NormEpiSub, subset = level1_global_new == "HR")
+
+### Tumor
+# filter
+SeuratObject_ERTotalTum <- subset(SeuratObject_ERTotalTum, subset = nFeature_RNA > 250)
+SeuratObject_HER2Tum <- subset(SeuratObject_HER2Tum, subset = nFeature_RNA > 250)
+SeuratObject_TNBCTum <- subset(SeuratObject_TNBCTum, subset = nFeature_RNA > 250)
+
+```
+
+```{r functions}
+### Functions ###
+## function: RunSeuratPipeline
+RunSeuratPipeline <- function(seu_object){
+  seu_object <- NormalizeData(seu_object, normalization.method = "LogNormalize", scale.factor = 10000)
+  seu_object <- FindVariableFeatures(seu_object, selection.method = "vst", nfeatures = 2000)
+  seu_object <- ScaleData(seu_object)
+  seu_object <- RunPCA(seu_object)
+  return(seu_object)
+}
+
+## function: extract PCs and SDs
+# extract PCs
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  #co1 <- which(cumu > 50)[1]
+  co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  #pcs <- min(co1, co2)
+  pcs <- co2
+  PCs <- as.data.frame(seu_object@reductions$pca@cell.embeddings[,c(1:pcs)])
+  return(PCs)
+}
+
+# extract SDs
+GetSDs <- function(seu_object, numPC){
+  pca <- seu_object@reductions$pca
+  total_variance <- seu_object@reductions$pca@misc$total.variance
+  eigValues <- (pca@stdev)^2
+  varExplained <- eigValues / total_variance
+  SDs <- (varExplained * 100)[1:numPC]
+  return(SDs)
+}
+## function: calculate centroid distance
+CalculateCentroidDistance <- function(PCs, withSD = NULL, SDs = NULL){
+  centroid_list <- as.vector(apply(PCs, 2, mean)) # calculate centroid for all PCs
+  centroid_matrix <- sweep(PCs, 2, centroid_list) # create matrix with centroid in the center (by substraction of centroid list)
+  # Calculate distance
+  if (!is.null(withSD)) {
+    distance <- sqrt(rowSums((sweep(centroid_matrix, 2, SDs, "*"))^2)) # with SD correction (if)
+  } else {
+    distance <- sqrt(rowSums(centroid_matrix^2)) # normal
+  }
+  distance <- as.matrix(distance)
+  return(distance)
+}
+```
+
+Centroid distances of Normals with variance weighting and optimal PCs
+
+```{r Normals_PC, fig.height=3, fig.width=5}
+
+#  Optimal PCs with weighted variance
+#### Cluster Analysis ####
+### Normal ------------------------------------------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_NormEpiSub@meta.data$patient_id))
+# Split so by patient
+SeuratObject_NormEpiSub_split <- SplitObject(SeuratObject_NormEpiSub, split.by = "patient_id")
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(normal_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(normal_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_NormEpiSub_split)) {
+  # split patients
+  patient <- SeuratObject_NormEpiSub_split[[i]]
+    # seurat pipeline
+    patient <- RunSeuratPipeline(patient)
+    # get PCs and SDs
+    EMBO_PCs[[i]] <- GetPCs(patient)
+    EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+#cell_count <- as.data.frame(table(SeuratObject_NormEpiSub@meta.data$patient_id))
+centroid_sum_N <- data.frame(mean = mean, sd = sd, patient_id = normal_ID, group = c(rep("All Epi", times = length(centroid_distances))))
+
+
+### Normal B ------------------------------------------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_Norm_B@meta.data$patient_id))
+# Split so by patient
+SeuratObject_N_B_split <- SplitObject(SeuratObject_Norm_B, split.by = "patient_id")
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(normal_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(normal_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_N_B_split)) {
+  # split patients
+  patient <- SeuratObject_N_B_split[[i]]
+    # seurat pipeline
+    patient <- RunSeuratPipeline(patient)
+    # get PCs and SDs
+    EMBO_PCs[[i]] <- GetPCs(patient)
+    EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+#cell_count <- as.data.frame(table(SeuratObject_Norm_B@meta.data$patient_id))
+centroid_sum_B <- data.frame(mean = mean, sd = sd, patient_id = normal_ID, group = c(rep("Basal", times = length(centroid_distances))))
+
+
+
+### Normal LP ------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_Norm_LP@meta.data$patient_id))
+# Split so by patient
+SeuratObject_N_LP_split <- SplitObject(SeuratObject_Norm_LP, split.by = "patient_id")
+
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(normal_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(normal_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_N_LP_split)) {
+  # split patients
+  patient <- SeuratObject_N_LP_split[[i]]
+    # seurat pipeline
+    patient <- RunSeuratPipeline(patient)
+    # get PCs and SDs
+    EMBO_PCs[[i]] <- GetPCs(patient)
+    EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+#cell_count <- as.data.frame(table(SeuratObject_Norm_LP@meta.data$patient_id))
+centroid_sum_LP <- data.frame(mean = mean, sd = sd, patient_id = normal_ID, group = c(rep("LP", times = length(centroid_distances))))
+
+
+### Normal HR ------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_Norm_HR@meta.data$patient_id))
+# Split so by patient
+SeuratObject_N_HR_split <- SplitObject(SeuratObject_Norm_HR, split.by = "patient_id")
+
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(normal_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(normal_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_N_HR_split)) {
+  # split patients
+  patient <- SeuratObject_N_HR_split[[i]]
+    # seurat pipeline
+    patient <- RunSeuratPipeline(patient)
+    # get PCs and SDs
+    EMBO_PCs[[i]] <- GetPCs(patient)
+    EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+#cell_count <- as.data.frame(table(SeuratObject_Norm_HR@meta.data$patient_id))
+centroid_sum_ML <- data.frame(mean = mean, sd = sd, patient_id = normal_ID, group = c(rep("HR", times = length(centroid_distances))))
+
+# do mean of subtypes:
+centroid_sum_N_mean_var <- rbind(centroid_sum_B, centroid_sum_LP, centroid_sum_ML)
+
+#### Normal vs Normal subtypes
+centroid_sum_var <- rbind(centroid_sum_N, centroid_sum_B, centroid_sum_LP, centroid_sum_ML)
+
+## plot
+
+p <- ggbarplot(centroid_sum_var, x = "group", y = "mean", 
+               add = c("mean_sd", "jitter"),
+               fill = "group", 
+               palette = c("#5c8d92", "#b8d7ac", "#a3cdc7", "#97b5c3"),
+               xlab = "Cell type",
+               ylab = "Weighted Mean CD",
+               position = position_dodge(0.8)) +
+  theme(legend.position = "none")
+
+p
+
+#setwd("D:/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/EMBO")
+#save(centroid_sum_var, file = "centroid_sum_var.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Pal")
+ggsave(filename = "Pal_wCD_NvsN.tiff", plot = p, width = 4, height = 2.5, dpi = 1200)
+
+
+### One-way Anova with Dunnett's test for multiple comparisons
+centroid_sum_var$group <- factor(centroid_sum_var$group)
+centroid_sum_var$group <- relevel(centroid_sum_var$group, ref = "All Epi") # set All Epi as reference group
+
+anova_result <- aov(mean ~ group, data = centroid_sum_var)
+summary(anova_result)
+dunnett_test <- glht(anova_result, linfct = mcp(group = "Dunnett"))
+summary(dunnett_test)
+pvalues <- as.vector(summary(dunnett_test)$test$pvalues)
+
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("All Epi", "All Epi", "All Epi"),
+  group2 = c("Basal", "LP", "HR"),
+  y.position = c(40, 45, 50),  # change these values as needed
+  p.adj = pvalues
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+
+centroid_sum_var <- centroid_sum_var %>% mutate(group = factor(group, levels = c("All Epi", "Basal", "LP", "HR")))
+p <- ggbarplot(centroid_sum_var, x = "group", y = "mean", 
+          add = c("mean_sd", "jitter"),
+          fill = "group", 
+          palette = c("#5c8d92", "#b8d7ac", "#a3cdc7", "#97b5c3"),
+          xlab = "Group",
+          ylab = "Weighted Mean CD",
+          ylim = c(0,70),
+          position = position_dodge(0.8)) +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01) +
+  theme(legend.position = "none")
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Pal")
+ggsave(filename = "Pal_wCD_NvsN.tiff", plot = p, width = 4, height = 2.5, dpi = 1200)
+
+```
+
+```{r Tumors, fig.height=4, fig.width=8}
+
+#  Optimal PCs with weighted variance
+### Tumor ER ------
+# get IDs
+tumor_ID <- as.character(unique(SeuratObject_ERTotalTum@meta.data$sample))
+# Split so by patient
+SeuratObject_ER_split <- SplitObject(SeuratObject_ERTotalTum, split.by = "sample")
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(tumor_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(tumor_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_ER_split)) {
+  # split patients
+  patient <- SeuratObject_ER_split[[i]]
+  # seurat pipeline
+  patient <- RunSeuratPipeline(patient)
+  # get PCs and SDs
+  EMBO_PCs[[i]] <- GetPCs(patient)
+  EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+cell_count <- as.data.frame(table(SeuratObject_ERTotalTum@meta.data$sample))
+centroid_sum_ER <- data.frame(mean = mean, sd = sd, patient_id = tumor_ID, count = cell_count$Freq, group = c(rep("ER+", times = length(centroid_distances))))
+
+### Tumor HER2 ------
+# get IDs
+tumor_ID <- as.character(unique(SeuratObject_HER2Tum@meta.data$sample))
+# Split so by patient
+SeuratObject_HER2_split <- SplitObject(SeuratObject_HER2Tum, split.by = "sample")
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(tumor_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(tumor_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_HER2_split)) {
+  # split patients
+  patient <- SeuratObject_HER2_split[[i]]
+  # seurat pipeline
+  patient <- RunSeuratPipeline(patient)
+  # get PCs and SDs
+  EMBO_PCs[[i]] <- GetPCs(patient)
+  EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+cell_count <- as.data.frame(table(SeuratObject_HER2Tum@meta.data$sample))
+centroid_sum_HER2 <- data.frame(mean = mean, sd = sd, patient_id = tumor_ID, count = cell_count$Freq, group = c(rep("HER2+", times = length(centroid_distances))))
+
+
+
+### Tumor TNBC ------
+# get IDs
+tumor_ID <- as.character(unique(SeuratObject_TNBCTum@meta.data$sample))
+# Split so by patient
+SeuratObject_TNBC_split <- SplitObject(SeuratObject_TNBCTum, split.by = "sample")
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+EMBO_PCs <- vector("list", length = length(tumor_ID)) # PCs
+EMBO_PC_SD <- vector("list", length = length(tumor_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(SeuratObject_TNBC_split)) {
+  # split patients
+  patient <- SeuratObject_TNBC_split[[i]]
+  # seurat pipeline
+  patient <- RunSeuratPipeline(patient)
+  # get PCs and SDs
+  EMBO_PCs[[i]] <- GetPCs(patient)
+  EMBO_PC_SD[[i]] <- GetSDs(patient, length(EMBO_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(EMBO_PCs))
+#
+for (i in 1:length(EMBO_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(EMBO_PCs[[i]], withSD = TRUE, EMBO_PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+cell_count <- as.data.frame(table(SeuratObject_TNBCTum@meta.data$sample))
+centroid_sum_TNBC <- data.frame(mean = mean, sd = sd, patient_id = tumor_ID, count = cell_count$Freq, group = c(rep("TNBC", times = length(centroid_distances))))
+
+
+### Normal_mean vs Tumors ###
+centroid_sum_T_var <- rbind(centroid_sum_ER, centroid_sum_HER2, centroid_sum_TNBC)
+#-
+centroid_sum_N_mean_var <- aggregate(centroid_sum_N_mean_var[,1:2], list(centroid_sum_N_mean_var$patient_id), FUN=mean)
+centroid_sum_N_mean_var <- centroid_sum_N_mean_var[,-1]
+centroid_sum_N_mean_var$group <- rep("Mean Epi")
+# add Tumors
+centroid_sum_Nmean_vs_T_var <- rbind(centroid_sum_N_mean_var, centroid_sum_T_var[,c(1,2,5)])
+
+## plot
+p <- ggbarplot(centroid_sum_Nmean_vs_T_var, x = "group", y = "mean", 
+               add = c("mean_sd", "jitter"),
+               fill = "group", 
+               palette = c("#9dbabd", "#ffb4a2", "#e5989b", "#b5838d"),
+               xlab = "Group",
+               ylab = "Weighted Mean CD",
+               ylim = c(0,70),
+               position = position_dodge(0.8)) +
+  theme(legend.position = "none")
+
+p
+
+#setwd("D:/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/EMBO")
+#save(centroid_sum_Nmean_vs_T_var, file = "centroid_sum_Nmean_vs_T_var.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Pal")
+ggsave(filename = "Pal_wCD_NvsT.tiff", plot = p, width = 4, height = 2.5, dpi = 1200)
+
+
+### Statistical test
+# check normality
+shapiro.test(centroid_sum_Nmean_vs_T_var$mean[centroid_sum_Nmean_vs_T_var$group == "Mean Epi"])
+shapiro.test(centroid_sum_Nmean_vs_T_var$mean[centroid_sum_Nmean_vs_T_var$group == "ER+"])
+shapiro.test(centroid_sum_Nmean_vs_T_var$mean[centroid_sum_Nmean_vs_T_var$group == "HER2+"])
+shapiro.test(centroid_sum_Nmean_vs_T_var$mean[centroid_sum_Nmean_vs_T_var$group == "TNBC"])
+
+### One-way Anova with Dunnett's test for multiple comparisons
+centroid_sum_Nmean_vs_T_var$group <- factor(centroid_sum_Nmean_vs_T_var$group)
+centroid_sum_Nmean_vs_T_var$group <- relevel(centroid_sum_Nmean_vs_T_var$group, ref = "Mean Epi") # set All Epi as reference group
+
+anova_result <- aov(mean ~ group, data = centroid_sum_Nmean_vs_T_var)
+summary(anova_result)
+dunnett_test <- glht(anova_result, linfct = mcp(group = "Dunnett"))
+summary(dunnett_test)
+pvalues <- as.vector(summary(dunnett_test)$test$pvalues)
+
+
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("Mean Epi", "Mean Epi", "Mean Epi"),
+  group2 = c("ER+", "HER2+", "TNBC"),
+  y.position = c(60, 65, 70),  # change these values as needed
+  p.adj = pvalues
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+
+p <- ggbarplot(centroid_sum_Nmean_vs_T_var, x = "group", y = "mean", 
+          add = c("mean_sd", "jitter"),
+          fill = "group", 
+          palette = c("#9dbebb", "#ffb4a2", "#e5989b", "#b5838d"),
+          xlab = "Group",
+          ylab = "Weighted Mean CD",
+          ylim = c(0,70),
+          position = position_dodge(0.8)) +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01) +
+  theme(legend.position = "none")
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Pal")
+ggsave(filename = "Pal_wCD_NvsT.tiff", plot = p, width = 4, height = 2.5, dpi = 1200)
+
+```
+
+
