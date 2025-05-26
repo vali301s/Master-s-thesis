@@ -1,0 +1,1256 @@
+---
+title: "Simulation_Paths_many_parameters_final_works"
+output: html_document
+date: "2025-02-14"
+---
+
+This is an improved version of de.prob with more parameters adjusted, in addition to de.prob.H1 is simulated with default parameters. And heterogeneity is increased by increasing bcv.common, lib.scale, de.prob, and de.facScale.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_libraries, include=FALSE}
+#Load libraries
+library(splatter)
+library(SingleCellExperiment)
+library(scater)
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(ggbreak)
+library(scBubbletree)
+library(ggtree)
+library(patchwork)
+library(dplyr)
+library(sctransform)
+
+options(future.globals.maxSize = 10 * 1024^4)
+
+# set seed
+set.seed(43)
+
+# color palette
+gradient_palette_5 <- rev(hcl.colors(5, palette = "Red-Blue")) # pick here: https://bookdown.org/hneth/ds4psy/D-3-apx-colors-basics.html
+
+
+```
+
+# Intro
+
+I wrote an issue on Github to the Splatter authors, asking them about using the BCV parameters and the weird Elbow plots I am encountering.
+
+Reply: "Thanks for giving {splatter} a go. Modifying the variation in a single population is something that hasn't come up very often and is maybe something that the splat simulation doesn't do very well. As you have seen the bcv parameters have some effect but maybe not what you would like and introducing enough different kinds of variation is something many simulations struggle with. I would be curious to see what this looks like in real data though. If you subset to only similar cells in a real population do you see a similar effect on the PCA?
+
+An alternative approach which has been used previously is to simulate a single path rather than one homogenous group. This gives you access to more parameters which you can manipulate to give you something closer to what you want, for example by reducing the amount of differential expression along the path so that it gives your cells some variation but not enough to create two separate populations."
+
+
+
+```{r Set_Heterogeneities_other_tries}
+
+  ### Set params: de extra, bcv.common and lib scale, but default v3 - WORKS
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, #seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, #seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, #seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, #seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, #seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+  
+```
+
+## PCA and Elbow plots
+
+```{r PCA_Elbow, fig.height=2, fig.width=10}
+
+# Functions
+PlotPCAPlot <- function(sim){
+  sim <- logNormCounts(sim)
+  sim <- runPCA(sim)
+  p <- plotPCA(sim)
+  return(p)
+}
+
+PlotElbowPlot <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  seu <- NormalizeData(seu)
+  seu <- FindVariableFeatures(seu)
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  p <- ElbowPlot(seu) 
+  return(p)
+}
+
+### PCA plots
+p1 <- PlotPCAPlot(sim_H1) + ggtitle("H1") + xlim(c(-25, 25)) + ylim(c(-25, 25)) + theme_bw() + geom_point(color = gradient_palette_5[1])
+p2 <- PlotPCAPlot(sim_H2) + ggtitle("H2") + xlim(c(-25, 25)) + ylim(c(-25, 25)) + theme_bw() + geom_point(color = gradient_palette_5[2])
+p3 <- PlotPCAPlot(sim_H3) + ggtitle("H3") + xlim(c(-25, 25)) + ylim(c(-25, 25)) + theme_bw() + geom_point(color = gradient_palette_5[3])
+p4 <- PlotPCAPlot(sim_H4) + ggtitle("H4") + xlim(c(-25, 25)) + ylim(c(-25, 25)) + theme_bw() + geom_point(color = gradient_palette_5[4])
+p5 <- PlotPCAPlot(sim_H5) + ggtitle("H5") + xlim(c(-25, 25)) + ylim(c(-25, 25)) + theme_bw() + geom_point(color = gradient_palette_5[5])
+
+p <- gridExtra::grid.arrange(p1, p2, p3, p4, p5, nrow = 1, ncol = 5)
+
+# ggsave("Simulated_PCA_plots.png", plot = p, dpi = 1200, width = 10, height = 2)
+
+
+### Elbow plots
+p1 <- PlotElbowPlot(sim_H1) + ggtitle("H1") 
+p2 <- PlotElbowPlot(sim_H2) + ggtitle("H2")
+p3 <- PlotElbowPlot(sim_H3) + ggtitle("H3") 
+p4 <- PlotElbowPlot(sim_H4) + ggtitle("H4") 
+p5 <- PlotElbowPlot(sim_H5) + ggtitle("H5") 
+gridExtra::grid.arrange(p1, p2, p3, p4, p5, nrow = 2, ncol = 3)
+  
+
+```
+
+
+# Heterogenetiy score calculations
+
+## CV method
+
+```{r FunctionsCV, echo=FALSE}
+### Prep: functions
+
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  return(seu)
+}
+
+
+## run seurat pipeline 
+RunSeuratPipeline <- function(seu_sim){
+  # get all genes
+  all.genes <- rownames(seu_sim)
+  # normalize 
+  seu_sim <- NormalizeData(seu_sim, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu_sim <- FindVariableFeatures(seu_sim, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu_sim <- ScaleData(seu_sim, features = all.genes)
+  # get scale.data (absolute values)
+  scale_matrix <- abs(as.data.frame(seu_sim@assays$RNA$scale.data))
+  return(scale_matrix)
+}
+
+
+## calculate CVs (faster)
+# 1. Function to calculate CV for a single sample
+calculate_CV <- function(sample) {
+  # Calculate SD and mean for each gene, ignoring zeros
+  sd_ex <- apply(sample, 1, function(x) sd(x[x > 0]))
+  mean_ex <- apply(sample, 1, function(x) mean(x[x > 0]))
+  # Calculate CV
+  cv <- sd_ex / mean_ex
+  return(cv)
+}
+#2. full function
+
+CalculateCVs <- function(scale_sim){
+  scale_sim <- scale_sim[rowSums(scale_sim != 0) > 0, ]
+  scale_sim <- as.data.frame(t(scale_sim))
+  cv_vector <- calculate_CV(scale_sim)
+  return(cv_vector)
+}
+
+
+CV_sum_calc <- function(CV_df) {
+  # std
+  std_cv <- apply(CV_df, 2, sd, na.rm=TRUE)
+  # cv
+  cv_cv <- apply(CV_df, 2, sd, na.rm=TRUE) / (apply(CV_df, 2, mean, na.rm=TRUE))
+  # mean
+  mean_cv <- apply(CV_df, 2, mean, na.rm=TRUE)
+  # median
+  med_cv <- apply(CV_df, 2, median, na.rm=TRUE)
+  # Append to dataframe
+  sum_df <- as.data.frame(rbind(std_cv, cv_cv, 
+                                mean_cv, med_cv))
+}
+
+```
+
+```{r RunCV, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+
+iter <- 10
+
+# Run CV method
+## initialize lists to store results
+Het1List <- vector("list", length = 10)
+Het2List <- vector("list", length = 10)
+Het3List <- vector("list", length = 10)
+Het4List <- vector("list", length = 10)
+Het5List <- vector("list", length = 10)
+
+## run for loop. for loop performs simulation, and then calculates the CV metrics from the scale data and saves them in the lists
+for (i in 1:iter){
+  
+  seed <- 43+i
+  
+  ### 0. set parameters: de extra, bcv.common and lib scale v2
+  ### 1. simulate datasets
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+        
+
+  seu_H1 <- simulateSeuOb(sim_H1)
+  seu_H2 <- simulateSeuOb(sim_H2)
+  seu_H3 <- simulateSeuOb(sim_H3)
+  seu_H4 <- simulateSeuOb(sim_H4)
+  seu_H5 <- simulateSeuOb(sim_H5)
+  
+  ### 2. run seurat pipeline to get scaled.matrix
+  scale_H1 <- RunSeuratPipeline(seu_H1)
+  scale_H2 <- RunSeuratPipeline(seu_H2)
+  scale_H3 <- RunSeuratPipeline(seu_H3)
+  scale_H4 <- RunSeuratPipeline(seu_H4)
+  scale_H5 <- RunSeuratPipeline(seu_H5)
+  
+  ### 4. run CV calc
+  CV_H1 <- CalculateCVs(scale_H1)
+  CV_H2 <- CalculateCVs(scale_H2)
+  CV_H3 <- CalculateCVs(scale_H3)
+  CV_H4 <- CalculateCVs(scale_H4)
+  CV_H5 <- CalculateCVs(scale_H5)
+  
+  ### 5. save results in dataframes
+  Het1List[[i]] <- CV_H1
+  Het2List[[i]] <- CV_H2
+  Het3List[[i]] <- CV_H3
+  Het4List[[i]] <- CV_H4
+  Het5List[[i]] <- CV_H5
+}
+  
+  
+## calculate CV summary
+CVHet1_all <- do.call(cbind, Het1List)
+CVHet1_all_sum <- CV_sum_calc(CVHet1_all)
+#
+CVHet2_all <- do.call(cbind, Het2List)
+CVHet2_all_sum <- CV_sum_calc(CVHet2_all)
+#
+CVHet3_all <- do.call(cbind, Het3List)
+CVHet3_all_sum <- CV_sum_calc(CVHet3_all)
+#
+CVHet4_all <- do.call(cbind, Het4List)
+CVHet4_all_sum <- CV_sum_calc(CVHet4_all)
+#
+CVHet5_all <- do.call(cbind, Het5List)
+CVHet5_all_sum <- CV_sum_calc(CVHet5_all)
+
+
+### plot
+## add type
+CVHet1_all_sum <- as.data.frame(t(CVHet1_all_sum))
+CVHet1_all_sum$type <- rep("H1")
+#
+CVHet2_all_sum <- as.data.frame(t(CVHet2_all_sum))
+CVHet2_all_sum$type <- rep("H2")
+#
+CVHet3_all_sum <- as.data.frame(t(CVHet3_all_sum))
+CVHet3_all_sum$type <- rep("H3")
+#
+CVHet4_all_sum <- as.data.frame(t(CVHet4_all_sum))
+CVHet4_all_sum$type <- rep("H4")
+#
+CVHet5_all_sum <- as.data.frame(t(CVHet5_all_sum))
+CVHet5_all_sum$type <- rep("H5")
+
+
+
+## merge
+CV_all_sum <- rbind(CVHet1_all_sum, CVHet2_all_sum, CVHet3_all_sum, CVHet4_all_sum, CVHet5_all_sum)
+## make longer
+CV_all_sum_l <- CV_all_sum %>% pivot_longer(cols = 1:4, names_to = "measurement", values_to = "score")
+CV_all_sum_l <- CV_all_sum_l %>%
+  mutate(type = factor(type, levels = c("H1", "H2", "H3", "H4", "H5")))
+## plot
+p <- ggbarplot(CV_all_sum_l, x = "measurement", y = "score", 
+               add = c("mean_sd", "jitter"),
+               color = "type", 
+               palette = gradient_palette_5,
+               xlab = "Compressing_method",
+               ylab = "Score",
+               position = position_dodge(0.8)) +
+  ggtitle("Heterogeneity scores", subtitle = "CV method")
+
+p
+
+```
+
+```{r RunMeanCV, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+
+iter <- 10
+
+# Run CV method
+## initialize lists to store results
+Het1List <- vector("list", length = 10)
+Het2List <- vector("list", length = 10)
+Het3List <- vector("list", length = 10)
+Het4List <- vector("list", length = 10)
+Het5List <- vector("list", length = 10)
+
+## run for loop. for loop performs simulation, and then calculates the CV metrics from the scale data and saves them in the lists
+for (i in 1:iter){
+  
+  seed <- 43+i
+  
+  ### 0. set parameters: de extra, bcv.common and lib scale v2
+  ### 1. simulate datasets
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+        
+
+  seu_H1 <- simulateSeuOb(sim_H1)
+  seu_H2 <- simulateSeuOb(sim_H2)
+  seu_H3 <- simulateSeuOb(sim_H3)
+  seu_H4 <- simulateSeuOb(sim_H4)
+  seu_H5 <- simulateSeuOb(sim_H5)
+  
+  ### 2. run seurat pipeline to get scaled.matrix
+  scale_H1 <- RunSeuratPipeline(seu_H1)
+  scale_H2 <- RunSeuratPipeline(seu_H2)
+  scale_H3 <- RunSeuratPipeline(seu_H3)
+  scale_H4 <- RunSeuratPipeline(seu_H4)
+  scale_H5 <- RunSeuratPipeline(seu_H5)
+  
+  ### 4. run CV calc
+  CV_H1 <- CalculateCVs(scale_H1)
+  CV_H2 <- CalculateCVs(scale_H2)
+  CV_H3 <- CalculateCVs(scale_H3)
+  CV_H4 <- CalculateCVs(scale_H4)
+  CV_H5 <- CalculateCVs(scale_H5)
+  
+  ### 5. save results in dataframes
+  Het1List[[i]] <- CV_H1
+  Het2List[[i]] <- CV_H2
+  Het3List[[i]] <- CV_H3
+  Het4List[[i]] <- CV_H4
+  Het5List[[i]] <- CV_H5
+}
+  
+  
+## calculate CV summary
+CVHet1_all <- do.call(cbind, Het1List)
+CVHet1_all_sum <- CV_sum_calc(CVHet1_all)
+#
+CVHet2_all <- do.call(cbind, Het2List)
+CVHet2_all_sum <- CV_sum_calc(CVHet2_all)
+#
+CVHet3_all <- do.call(cbind, Het3List)
+CVHet3_all_sum <- CV_sum_calc(CVHet3_all)
+#
+CVHet4_all <- do.call(cbind, Het4List)
+CVHet4_all_sum <- CV_sum_calc(CVHet4_all)
+#
+CVHet5_all <- do.call(cbind, Het5List)
+CVHet5_all_sum <- CV_sum_calc(CVHet5_all)
+
+
+### plot
+## add type
+CVHet1_all_sum <- as.data.frame(t(CVHet1_all_sum))
+CVHet1_all_sum$type <- rep("H1")
+#
+CVHet2_all_sum <- as.data.frame(t(CVHet2_all_sum))
+CVHet2_all_sum$type <- rep("H2")
+#
+CVHet3_all_sum <- as.data.frame(t(CVHet3_all_sum))
+CVHet3_all_sum$type <- rep("H3")
+#
+CVHet4_all_sum <- as.data.frame(t(CVHet4_all_sum))
+CVHet4_all_sum$type <- rep("H4")
+#
+CVHet5_all_sum <- as.data.frame(t(CVHet5_all_sum))
+CVHet5_all_sum$type <- rep("H5")
+
+
+
+## merge
+CV_all_sum <- rbind(CVHet1_all_sum, CVHet2_all_sum, CVHet3_all_sum, CVHet4_all_sum, CVHet5_all_sum)
+CV_all_sum <- CV_all_sum[,c(3,5)]
+
+CV_all_sum <- CV_all_sum %>%
+  mutate(type = factor(type, levels = c("H1", "H2", "H3", "H4", "H5")))
+## plot
+p <- ggbarplot(CV_all_sum, x = "type", y = "mean_cv", 
+               add = c("mean_sd", "jitter"),
+               fill = "type", 
+               palette = gradient_palette_5,
+               xlab = "Heterogeneity",
+               ylab = "Mean CV",
+               position = position_dodge(0.8)) +
+  theme(legend.position = "none")
+
+p
+
+
+#ggsave(filename = "Simulation_CV.tiff", width = 4, height = 2.5, dpi = 1200)
+#save(CV_all_sum, file = "CV_all_sum.RData")
+
+```
+
+## Centroid method
+
+```{r Centroid_functions_opt, include=FALSE}
+
+## Functions
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  return(seu)
+}
+
+## function: extract PCs and SDs
+# extract PCs
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 45)[1]
+  co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+    if (co2 < 5) {
+    co2 <- NULL  # Ensure co1 has at least 5 PCs, else return NULL
+    }
+  pcs <- min(co1, co2, na.rm = T)
+  PCs <- as.data.frame(seu_object@reductions$pca@cell.embeddings[,c(1:pcs)])
+  return(PCs)
+}
+
+# extract SDs
+GetSDs <- function(seu_object, numPC){
+  mat <- seu_object@assays$RNA$scale.data
+  pca <- seu_object@reductions$pca
+  total_variance <- sum(matrixStats::rowVars(mat))
+  eigValues <- (pca@stdev)^2
+  varExplained <- eigValues / total_variance
+  sim_SDs <- (varExplained * 100)[1:numPC]
+  return(sim_SDs)
+}
+
+## function: calculate centroid distance
+CalculateCentroidDistance <- function(sim_PCs, withSD = NULL, sim_SDs = NULL){
+  centroid_list <- as.vector(apply(sim_PCs, 2, mean)) # calculate centroid for all PCs
+  centroid_matrix <- sweep(sim_PCs, 2, centroid_list) # create matrix with centroid in the center (by substraction of centroid list)
+  # Calculate distance
+  if (!is.null(withSD)) {
+    distance <- sqrt(rowSums((sweep(centroid_matrix, 2, sim_SDs, "*"))^2)) # with SD correction (if)
+  } else {
+    distance <- sqrt(rowSums(centroid_matrix^2)) # normal
+  }
+  distance <- as.matrix(distance)
+  return(distance)
+}
+
+```
+
+```{r Run_Centroid_opt, fig.height=4, fig.width=6}
+
+#### Method: With SD correction and optimal PCs------------
+
+iter <- 10
+
+## initialize lists to store results
+Het1List <- vector("list", length = 10)
+Het2List <- vector("list", length = 10)
+Het3List <- vector("list", length = 10)
+Het4List <- vector("list", length = 10)
+Het5List <- vector("list", length = 10)
+
+## run for loop. for loop performs simulation, and then calculates centroid distances and saves them in the lists
+for (i in 1:iter){
+  
+  seed <- 43+i
+  
+  ### 0. set parameters: de extra, bcv.common and lib scale v2
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+        
+
+  ### 1. simulate datasets
+  seu_H1 <- simulateSeuOb(sim_H1)
+  seu_H2 <- simulateSeuOb(sim_H2)
+  seu_H3 <- simulateSeuOb(sim_H3)
+  seu_H4 <- simulateSeuOb(sim_H4)
+  seu_H5 <- simulateSeuOb(sim_H5)
+  
+  
+  ### 2. extract PCs
+  H1_PCs <- GetPCs(seu_H1)
+  H1_SDs <- GetSDs(seu_H1, length(H1_PCs))
+  H2_PCs <- GetPCs(seu_H2)
+  H2_SDs <- GetSDs(seu_H2, length(H2_PCs))
+  H3_PCs <- GetPCs(seu_H3)
+  H3_SDs <- GetSDs(seu_H3, length(H3_PCs))
+  H4_PCs <- GetPCs(seu_H4)
+  H4_SDs <- GetSDs(seu_H4, length(H4_PCs))
+  H5_PCs <- GetPCs(seu_H5)
+  H5_SDs <- GetSDs(seu_H5, length(H5_PCs))
+  
+  ### 3. calculate distance to centroid
+  centroid_H1 <- CalculateCentroidDistance(H1_PCs, withSD = TRUE, sim_SDs = H1_SDs)
+  centroid_H2 <- CalculateCentroidDistance(H2_PCs, withSD = TRUE, sim_SDs = H2_SDs)
+  centroid_H3 <- CalculateCentroidDistance(H3_PCs, withSD = TRUE, sim_SDs = H3_SDs)
+  centroid_H4 <- CalculateCentroidDistance(H4_PCs, withSD = TRUE, sim_SDs = H4_SDs)
+  centroid_H5 <- CalculateCentroidDistance(H5_PCs, withSD = TRUE, sim_SDs = H5_SDs)
+  
+  ### 4. save results in dataframes
+  Het1List[[i]] <- centroid_H1
+  Het2List[[i]] <- centroid_H2
+  Het3List[[i]] <- centroid_H3
+  Het4List[[i]] <- centroid_H4
+  Het5List[[i]] <- centroid_H5
+}
+
+### Summary
+## calculate CV summary
+CD_Het1List <- do.call(cbind, Het1List)
+CD_Het2List <- do.call(cbind, Het2List)
+CD_Het3List <- do.call(cbind, Het3List)
+CD_Het4List <- do.call(cbind, Het4List)
+CD_Het5List <- do.call(cbind, Het5List)
+
+# calculate mean of centroid_distances
+CD_Het1List_sum <- apply(CD_Het1List, 2, mean)
+CD_Het2List_sum <- apply(CD_Het2List, 2, mean)
+CD_Het3List_sum <- apply(CD_Het3List, 2, mean)
+CD_Het4List_sum <- apply(CD_Het4List, 2, mean)
+CD_Het5List_sum <- apply(CD_Het5List, 2, mean)
+
+### plot
+## add type
+CD_Het1List_sum <- data.frame(score = CD_Het1List_sum,
+                              type = rep("H1"))
+#
+CD_Het2List_sum <- data.frame(score = CD_Het2List_sum,
+                              type = rep("H2"))
+#
+CD_Het3List_sum <- data.frame(score = CD_Het3List_sum,
+                              type = rep("H3"))
+#
+CD_Het4List_sum <- data.frame(score = CD_Het4List_sum,
+                              type = rep("H4"))
+#
+CD_Het5List_sum <- data.frame(score = CD_Het5List_sum,
+                              type = rep("H5"))
+## merge
+CD_all_sum <- rbind(CD_Het1List_sum, CD_Het2List_sum, CD_Het3List_sum, CD_Het4List_sum, CD_Het5List_sum)
+CD_all_sum <- CD_all_sum %>%
+  mutate(type = factor(type, levels = c("H1", "H2", "H3", "H4", "H5")))
+## plot
+ggbarplot(CD_all_sum, x = "type", y = "score", 
+          add = c("mean_sd", "jitter"),
+          fill = "type", 
+          palette = gradient_palette_5,
+          xlab = "Heterogeneity",
+          ylab = "Weighted Mean CD",
+          position = position_dodge(0.8)) + 
+  theme(legend.position = "none")
+
+
+#save(CD_all_sum, file = "CD_all_sum.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave(filename = "Simulation_CD_SD.tiff", width = 4, height = 2.5, dpi = 1200)
+
+```
+
+```{r Run_Centroid_noSD, fig.height=4, fig.width=6}
+
+#### Method: With no SD correction and optimal PCs------------
+
+iter <- 10
+
+## initialize lists to store results
+Het1List <- vector("list", length = 10)
+Het2List <- vector("list", length = 10)
+Het3List <- vector("list", length = 10)
+Het4List <- vector("list", length = 10)
+Het5List <- vector("list", length = 10)
+
+## run for loop. for loop performs simulation, and then calculates centroid distances and saves them in the lists
+for (i in 1:iter){
+  
+  seed <- 43+i
+  
+  ### 0. set parameters: de extra, bcv.common and lib scale v2
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+        
+
+  ### 1. simulate datasets
+  seu_H1 <- simulateSeuOb(sim_H1)
+  seu_H2 <- simulateSeuOb(sim_H2)
+  seu_H3 <- simulateSeuOb(sim_H3)
+  seu_H4 <- simulateSeuOb(sim_H4)
+  seu_H5 <- simulateSeuOb(sim_H5)
+  
+  
+  ### 2. extract PCs
+  H1_PCs <- GetPCs(seu_H1)
+  H2_PCs <- GetPCs(seu_H2)
+  H3_PCs <- GetPCs(seu_H3)
+  H4_PCs <- GetPCs(seu_H4)
+  H5_PCs <- GetPCs(seu_H5)
+  
+  ### 3. calculate distance to centroid
+  centroid_H1 <- CalculateCentroidDistance(H1_PCs)
+  centroid_H2 <- CalculateCentroidDistance(H2_PCs)
+  centroid_H3 <- CalculateCentroidDistance(H3_PCs)
+  centroid_H4 <- CalculateCentroidDistance(H4_PCs)
+  centroid_H5 <- CalculateCentroidDistance(H5_PCs)
+  
+  ### 4. save results in dataframes
+  Het1List[[i]] <- centroid_H1
+  Het2List[[i]] <- centroid_H2
+  Het3List[[i]] <- centroid_H3
+  Het4List[[i]] <- centroid_H4
+  Het5List[[i]] <- centroid_H5
+}
+
+### Summary
+## calculate CV summary
+CD_Het1List <- do.call(cbind, Het1List)
+CD_Het2List <- do.call(cbind, Het2List)
+CD_Het3List <- do.call(cbind, Het3List)
+CD_Het4List <- do.call(cbind, Het4List)
+CD_Het5List <- do.call(cbind, Het5List)
+
+# calculate mean of centroid_distances
+CD_Het1List_sum <- apply(CD_Het1List, 2, mean)
+CD_Het2List_sum <- apply(CD_Het2List, 2, mean)
+CD_Het3List_sum <- apply(CD_Het3List, 2, mean)
+CD_Het4List_sum <- apply(CD_Het4List, 2, mean)
+CD_Het5List_sum <- apply(CD_Het5List, 2, mean)
+
+### plot
+## add type
+CD_Het1List_sum <- data.frame(score = CD_Het1List_sum,
+                              type = rep("H1"))
+#
+CD_Het2List_sum <- data.frame(score = CD_Het2List_sum,
+                              type = rep("H2"))
+#
+CD_Het3List_sum <- data.frame(score = CD_Het3List_sum,
+                              type = rep("H3"))
+#
+CD_Het4List_sum <- data.frame(score = CD_Het4List_sum,
+                              type = rep("H4"))
+#
+CD_Het5List_sum <- data.frame(score = CD_Het5List_sum,
+                              type = rep("H5"))
+## merge
+CDnoSD_all_sum <- rbind(CD_Het1List_sum, CD_Het2List_sum, CD_Het3List_sum, CD_Het4List_sum, CD_Het5List_sum)
+CDnoSD_all_sum <- CDnoSD_all_sum %>%
+  mutate(type = factor(type, levels = c("H1", "H2", "H3", "H4", "H5")))
+## plot
+p <- ggbarplot(CDnoSD_all_sum, x = "type", y = "score", 
+          add = c("mean_sd", "jitter"),
+          fill = "type", 
+          palette = gradient_palette_5,
+          xlab = "Heterogeneity",
+          ylab = "Mean CD",
+          position = position_dodge(0.8)) + 
+  theme(legend.position = "none")
+
+
+#save(CDnoSD_all_sum, file = "CDnoSD_all_sum.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave(filename = "Simulation_CD_noSD.tiff", width = 4, height = 2.5, dpi = 1200)
+
+```
+
+```{r Correlation plots}
+
+###### CV vs CD, all cells ########
+
+# Initialize an empty data frame
+all_data <- data.frame(
+  CD = numeric(),
+  CV = numeric(),
+  Heterogeneity = character()
+)
+
+# Loop through each heterogeneity level using only the first iteration
+for (i in 1:5) {
+  cd_data <- as.matrix(get(paste0("CD_Het", i, "List")))[, 1]  # First column
+  cv_data <- as.matrix(get(paste0("CVHet", i, "_all")))[, 1]   # First column
+  
+  # Combine into a single data frame for this heterogeneity level
+  temp_data <- data.frame(
+    CD = cd_data,
+    CV = cv_data,
+    Heterogeneity = paste0("H", i)
+  )
+  
+  # Bind to the full data set
+  all_data <- bind_rows(all_data, temp_data)
+}
+
+# All cells plotted  + correlation line
+ggplot(all_data, aes(x = CV, y = CD)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal(base_size = 16) +
+  ggtitle("Scatter Plot of CD vs CV Across Heterogeneity Levels") +
+  xlab("CV Values") +
+  ylab("CD Values") +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12))
+
+# All cells plotted, colored by heterogeneity + correlation line
+ggplot(all_data, aes(x = CV, y = CD, color = Heterogeneity)) +
+  geom_point(size = 0.5, alpha = 0.3) +
+  geom_smooth(method = "lm", se = FALSE, aes(color = Heterogeneity)) +
+  scale_color_manual(values = gradient_palette_5) +
+  theme_minimal(base_size = 16) +
+  ggtitle("Scatter Plot of CD vs CV Across Heterogeneity Levels") +
+  xlab("CV Values") +
+  ylab("CD Values") +
+  theme(plot.title = element_text(face = "bold", size = 15),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12))
+
+
+
+###### CV vs CD, mean ########
+
+# Combine CD and CV
+colnames(CD_all_sum) <- c("mean_cd", "heterogeneity")
+CD_CV_all <- cbind(CD_all_sum, CV_all_sum)
+
+# Calculate Pearson correlation for the entire dataset
+cor_test <- cor.test(CD_CV_all$mean_cd, CD_CV_all$mean_cv, method = "pearson")
+
+# Extract R and p-value
+R_value <- round(cor_test$estimate, 3)
+p_value <- signif(cor_test$p.value, 3)
+
+# Plot
+ggplot(CD_CV_all, aes(x = mean_cd, y = mean_cv, color = type)) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  scale_color_manual(values = gradient_palette_5) +  # Use your custom palette
+  theme_classic() +
+  xlab("Mean CD") +
+  ylab("Mean CV") +
+  theme(axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12)) +
+  annotate("text", x = max(CD_CV_all$mean_cd) * 0.1, y = max(CD_CV_all$mean_cv) * 0.995,
+           label = paste0("R = ", R_value, "\np = ", p_value), size = 5, color = "black")
+
+
+
+```
+
+
+
+## Euclidean distance
+
+```{r FunctionsED, echo=FALSE}
+
+## functions: simulations -> seu objects
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  return(seu)
+}
+
+## check euclidean
+GetEDmean <- function(seu){
+  Embs <- Embeddings(object = seu[["pca"]])
+  Embs <-  as.data.frame(Embs)
+  ED_mean <- mean(as.matrix(dist(Embs, method = "euclidean")))
+  return(ED_mean)
+}
+
+```
+
+```{r RunED, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+
+#### Method: With SD correction and optimal PCs------------
+
+iter <- 10
+
+## initialize lists to store results
+Het1List <- vector("list", length = 10)
+Het2List <- vector("list", length = 10)
+Het3List <- vector("list", length = 10)
+Het4List <- vector("list", length = 10)
+Het5List <- vector("list", length = 10)
+
+## run for loop. for loop performs simulation, and then calculates centroid distances and saves them in the lists
+for (i in 1:iter){
+  
+  seed <- 43+i
+  
+  ### 0. set parameters: de extra, bcv.common and lib scale v2
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+        
+
+  ### 1. simulate datasets
+  seu_H1 <- simulateSeuOb(sim_H1)
+  seu_H2 <- simulateSeuOb(sim_H2)
+  seu_H3 <- simulateSeuOb(sim_H3)
+  seu_H4 <- simulateSeuOb(sim_H4)
+  seu_H5 <- simulateSeuOb(sim_H5)
+  
+  
+  ### 2. Get ED
+  ED_mean_H1 <- GetEDmean(seu_H1)
+  ED_mean_H2 <- GetEDmean(seu_H2)
+  ED_mean_H3 <- GetEDmean(seu_H3)
+  ED_mean_H4 <- GetEDmean(seu_H4)
+  ED_mean_H5 <- GetEDmean(seu_H5)
+  
+  ### 3. Save in dataframe
+  Het1List[[i]] <- ED_mean_H1
+  Het2List[[i]] <- ED_mean_H2
+  Het3List[[i]] <- ED_mean_H3
+  Het4List[[i]] <- ED_mean_H4
+  Het5List[[i]] <- ED_mean_H5
+}
+
+### Summary
+## calculate ED summary
+  Het1List <- t(as.data.frame(do.call(cbind, Het1List)))
+  Het2List <- t(as.data.frame(do.call(cbind, Het2List)))
+  Het3List <- t(as.data.frame(do.call(cbind, Het3List)))
+  Het4List <- t(as.data.frame(do.call(cbind, Het4List)))
+  Het5List <- t(as.data.frame(do.call(cbind, Het5List)))
+
+
+### plot
+## add type
+  ED_Het1List <- data.frame(score = Het1List,
+                              type = rep("H1"))
+#
+  ED_Het2List <- data.frame(score = Het2List,
+                              type = rep("H2"))
+#
+  ED_Het3List <- data.frame(score = Het3List,
+                              type = rep("H3"))
+#
+  ED_Het4List <- data.frame(score = Het4List,
+                              type = rep("H4"))
+#
+  ED_Het5List <- data.frame(score = Het5List,
+                              type = rep("H5"))
+  
+## merge
+ED_all_sum <- rbind(ED_Het1List, ED_Het2List, ED_Het3List, ED_Het4List, ED_Het5List)
+ED_all_sum <- ED_all_sum %>%
+  mutate(type = factor(type, levels = c("H1", "H2", "H3", "H4", "H5")))
+## plot
+p <- ggbarplot(ED_all_sum, x = "type", y = "score", 
+          add = c("mean_sd", "jitter"),
+          fill = "type", 
+          palette = gradient_palette_5,
+          xlab = "Heterogeneity",
+          ylab = "Mean ED",
+          position = position_dodge(0.8)) + 
+  theme(legend.position = "none")
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+#ggsave(filename = "Simulation_ED.tiff", width = 4, height = 2.5, dpi = 1200)
+
+#save(ED_all_sum, file = "ED_all_sum.RData")
+
+```
+
+
+## Shannon Entropy
+
+```{r SE_functions}
+
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  return(seu)
+}
+
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 45)[1]
+  #co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  PCopt <- co1
+  return(1:PCopt)
+}
+
+scBubblePlotPipeline <- function(d){
+  # Select the 5,000 most variable genes
+  d <- FindVariableFeatures(object = d, selection.method = "vst", nfeatures = 5000)
+  # Normalize the data using SCTransform
+  d <- SCTransform(d, variable.features.n = 5000)
+  # Run PCA
+  d <- RunPCA(object = d, npcs = 50, features = VariableFeatures(object = d))
+  # select optimal dims
+  selected_dims <- GetPCs(d)
+  
+  ### scBubbleTree
+    # Extract the PCA embeddings
+    A <- d@reductions$pca@cell.embeddings[, 1:length(selected_dims)]
+    m <- d@meta.data
+    d_ccl <- list(A = A, m = m)
+    
+    #k-means
+    b_k <- get_k(B_gap = 10,
+             ks = 1:30, # no. of ks
+             x = A, # input matrix
+             n_start = 50, 
+             iter_max = 100,
+             kmeans_algorithm = "MacQueen", 
+             cores = 2)
+    
+    ## find optimal k
+    gap_stats <- b_k$gap_stats_summary
+    gap_diff <- diff(gap_stats$gap_mean) / gap_stats$gap_mean[-length(gap_stats$gap_mean)]
+    optimal_k <- which(gap_diff < 0.01)[1] # First k where % change < 1%
+    
+    k <- get_bubbletree_kmeans(x = A,
+                           k = optimal_k,
+                           cores = 1,
+                           B = 300,
+                           N_eff = 200,
+                           round_digits = 1,
+                           show_simple_count = FALSE,
+                           kmeans_algorithm = "MacQueen")
+    return(k)
+}
+
+
+```
+
+```{r Run_SE}
+
+## initialize lists to store results
+iter <- 10
+
+Het1List <- vector("list", length = iter)
+Het2List <- vector("list", length = iter)
+Het3List <- vector("list", length = iter)
+Het4List <- vector("list", length = iter)
+Het5List <- vector("list", length = iter)
+
+## run for loop. for loop performs simulation, and then calculates SE and saves them in the lists
+for (i in 1:iter){
+  
+  seed <- i
+  
+  ### Set params: de extra, bcv.common and lib scale v2 - WORKS!
+  params.groups <- newSplatParams(batchCells = 1000, nGenes = 10000)
+
+  #H1 (very low)
+  sim_H1 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.1, lib.scale = 0.2, group.prob = 1, de.prob = 0.1, de.facLoc = 0.1, path.from = 0, verbose = FALSE)
+  #H2 (low)
+  sim_H2 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.15, lib.scale = 0.3, group.prob = 1, de.prob = 0.3, de.facLoc = 0.3, path.from = 0, verbose = FALSE)
+  #H3 (medium)
+  sim_H3 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  #H4 (high)
+  sim_H4 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.25, lib.scale = 0.5, group.prob = 1, de.prob = 0.7, de.facLoc = 0.7, path.from = 0, verbose = FALSE)
+  #H5 (very high)
+  sim_H5 <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.3, lib.scale = 0.6, group.prob = 1, de.prob = 0.9, de.facLoc = 0.9, path.from = 0, verbose = FALSE)
+                               
+    
+  ### 1. simulate datasets
+  seu_H1 <- simulateSeuOb(sim_H1)
+  seu_H2 <- simulateSeuOb(sim_H2)
+  seu_H3 <- simulateSeuOb(sim_H3)
+  seu_H4 <- simulateSeuOb(sim_H4)
+  seu_H5 <- simulateSeuOb(sim_H5)
+  
+  ### 2. run scBubbletree
+  tree_H1 <- tryCatch(scBubblePlotPipeline(seu_H1), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+  tree_H2 <- tryCatch(scBubblePlotPipeline(seu_H2), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+  tree_H3 <- tryCatch(scBubblePlotPipeline(seu_H3), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+  tree_H4 <- tryCatch(scBubblePlotPipeline(seu_H4), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+  tree_H5 <- tryCatch(scBubblePlotPipeline(seu_H5), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+  
+  ### 3. calculate SE
+  if ("tree_meta" %in% names(tree_H1)) { # Check if "tree_meta" exists in the tree
+      results_df <- tree_H1[["tree_meta"]]
+      probs <- results_df$p       # Calculate Shannon entropy
+      SE_H1 <- -sum(probs * log2(probs))
+    } else {
+      SE_H1 <- 0 # Assign 0 if "tree_meta" is not present
+    }
+  if ("tree_meta" %in% names(tree_H2)) { # Check if "tree_meta" exists in the tree
+      results_df <- tree_H2[["tree_meta"]]
+      probs <- results_df$p       # Calculate Shannon entropy
+      SE_H2 <- -sum(probs * log2(probs))
+    } else {
+      SE_H2 <- 0 # Assign 0 if "tree_meta" is not present
+    }
+  if ("tree_meta" %in% names(tree_H3)) { # Check if "tree_meta" exists in the tree
+      results_df <- tree_H3[["tree_meta"]]
+      probs <- results_df$p       # Calculate Shannon entropy
+      SE_H3 <- -sum(probs * log2(probs))
+    } else {
+      SE_H3 <- 0 # Assign 0 if "tree_meta" is not present
+    }
+  if ("tree_meta" %in% names(tree_H4)) { # Check if "tree_meta" exists in the tree
+      results_df <- tree_H4[["tree_meta"]]
+      probs <- results_df$p       # Calculate Shannon entropy
+      SE_H4 <- -sum(probs * log2(probs))
+    } else {
+      SE_H4 <- 0 # Assign 0 if "tree_meta" is not present
+    }
+  if ("tree_meta" %in% names(tree_H5)) { # Check if "tree_meta" exists in the tree
+      results_df <- tree_H5[["tree_meta"]]
+      probs <- results_df$p       # Calculate Shannon entropy
+      SE_H5 <- -sum(probs * log2(probs))
+    } else {
+      SE_H5 <- 0 # Assign 0 if "tree_meta" is not present
+    }
+  
+  
+  ### 4. Save in dataframe
+  Het1List[[i]] <- SE_H1
+  Het2List[[i]] <- SE_H2
+  Het3List[[i]] <- SE_H3
+  Het4List[[i]] <- SE_H4
+  Het5List[[i]] <- SE_H5
+  
+  }
+
+### Summary
+## calculate ED summary
+  SE_Het1 <- t(as.data.frame(do.call(cbind, Het1List)))
+  SE_Het2 <- t(as.data.frame(do.call(cbind, Het2List)))
+  SE_Het3 <- t(as.data.frame(do.call(cbind, Het3List)))
+  SE_Het4 <- t(as.data.frame(do.call(cbind, Het4List)))
+  SE_Het5 <- t(as.data.frame(do.call(cbind, Het5List)))
+
+
+### plot
+## add type
+  SE_Het1_sum <- data.frame(score = SE_Het1,
+                              type = rep("H1"))
+#
+  SE_Het2_sum <- data.frame(score = SE_Het2,
+                              type = rep("H2"))
+#
+  SE_Het3_sum <- data.frame(score = SE_Het3,
+                              type = rep("H3"))
+#
+  SE_Het4_sum <- data.frame(score = SE_Het4,
+                              type = rep("H4"))
+#
+  SE_Het5_sum <- data.frame(score = SE_Het5,
+                              type = rep("H5"))
+  
+## merge
+SE_all_sum <- rbind(SE_Het1_sum, SE_Het2_sum, SE_Het3_sum, SE_Het4_sum, SE_Het5_sum)
+SE_all_sum <- SE_all_sum %>%
+  mutate(type = factor(type, levels = c("H1", "H2", "H3", "H4", "H5")))
+## plot
+p <- ggbarplot(SE_all_sum, x = "type", y = "score", 
+          add = c("mean_sd", "jitter"),
+          fill = "type", 
+          palette = gradient_palette_5,
+          xlab = "Heterogeneity",
+          ylab = "Shannon Entropy",
+          position = position_dodge(0.8)) +
+  theme(legend.position = "none")
+p
+
+
+ggsave(filename = "Simulation_SE.tiff", width = 4, height = 2.5, dpi = 1200)
+
+#save(SE_all_sum, file = "SE_all_sum_1%.RData")
+
+```
+
+
+```{r Corr_Heatmap}
+library(corrplot)
+
+# Combine CD and CV
+colnames(CD_all_sum) <- c("mean_cd", "heterogeneity")
+colnames(CDnoSD_all_sum) <- c("mean_cd", "heterogeneity")
+colnames(SE_all_sum) <- c("SE", "heterogeneity")
+
+data_all <- data.frame(
+  Mean_CV = CV_all_sum$mean_cv,
+  Mean_CD_noSD = CDnoSD_all_sum$mean_cd,
+  Mean_CD = CD_all_sum$mean_cd,
+  Shannon_Entropy = SE_all_sum$SE
+)
+
+# Compute the correlation matrix and calc. p-values
+cor_matrix <- cor(data_all, method = "pearson")
+p_matrix <- cor.mtest(data_all, method = "pearson")$p
+
+# PLot corrplot
+corrplot(cor_matrix, method = "color", type = "full", 
+         addCoef.col = "black",
+         tl.col = "black",  
+         tl.srt = 45,
+         tl.cex = 1,
+         number.font=2,
+         number.cex = 1,
+         cl.cex = 1,      
+         cl.align.text = "l", 
+         cl.length = 5,
+         addgrid.col = "grey",
+         outline = "black",
+         p.mat = p_matrix,
+         sig.level = c(0.001, 0.01, 0.05),
+         pch.col = "white",
+         insig = "label_sig",
+         pch.cex = 1.5,      
+         mar = c(1, 1, 2, 1),
+         col = COL2('RdYlBu', 20))
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+
+# save
+tiff("Simulation_corr.tiff", width = 6000, height = 4800, res = 1200)
+corrplot(cor_matrix, method = "color", type = "full", 
+         addCoef.col = "black",
+         tl.col = "black",  
+         tl.srt = 45,
+         tl.cex = 1,
+         number.font=2,
+         number.cex = 1,
+         cl.cex = 1,      
+         cl.align.text = "l", 
+         cl.length = 5,
+         addgrid.col = "grey",
+         outline = "black",
+         #p.mat = p_matrix,
+         #sig.level = c(0.001, 0.01, 0.05),
+         #pch.col = "white",
+         #insig = "label_sig",
+         tl.pos = "n", # to hide labels -> will add in PPT
+         pch.cex = 1.5,      
+         mar = c(1, 1, 2, 1),
+         col = COL2('RdYlBu', 100))
+dev.off() 
+
+```
+
