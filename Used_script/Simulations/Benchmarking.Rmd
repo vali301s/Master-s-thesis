@@ -1,0 +1,316 @@
+---
+title: "Simulation_Paths_many_benchmark"
+output: html_document
+date: "2025-02-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_libraries, include=FALSE}
+#Load libraries
+library(splatter)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+library(bench)
+library(SingleCellExperiment)
+library(scater)
+library(tidyverse)
+library(ggpubr)
+library(ggbreak)
+library(scBubbletree)
+library(ggtree)
+library(patchwork)
+library(sctransform)
+library(ggh4x)
+
+options(future.globals.maxSize = 10 * 1024^4)
+
+
+```
+
+```{r functions}
+
+### 1. CV
+RunSeuratPipelineCV <- function(sim){
+  count_matrix <- counts(sim)
+  seu_sim <- CreateSeuratObject(counts = count_matrix)
+  # get all genes
+  all.genes <- rownames(seu_sim)
+  # normalize 
+  seu_sim <- NormalizeData(seu_sim, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu_sim <- FindVariableFeatures(seu_sim, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu_sim <- ScaleData(seu_sim, features = all.genes)
+  # get scale.data (absolute values)
+  scale_matrix <- abs(as.data.frame(seu_sim@assays$RNA$scale.data))
+  return(scale_matrix)
+}
+
+calculate_CV <- function(sample) {
+  # Calculate SD and mean for each gene, ignoring zeros
+  sd_ex <- apply(sample, 1, function(x) sd(x[x > 0]))
+  mean_ex <- apply(sample, 1, function(x) mean(x[x > 0]))
+  # Calculate CV
+  cv <- sd_ex / mean_ex
+  return(cv)
+}
+
+
+### 2. CD
+
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  return(seu)
+}
+
+## function: extract PCs and SDs
+# extract PCs
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 50)[1]
+  co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+    if (co2 < 5) {
+    co2 <- NULL  # Ensure co1 has at least 5 PCs, else return NULL
+    }
+  pcs <- min(co1, co2, na.rm = T)
+  PCs <- as.data.frame(seu_object@reductions$pca@cell.embeddings[,c(1:pcs)])
+  return(PCs)
+}
+
+# extract SDs
+GetSDs <- function(seu_object, numPC){
+  mat <- seu_object@assays$RNA$scale.data
+  pca <- seu_object@reductions$pca
+  total_variance <- sum(matrixStats::rowVars(mat))
+  eigValues <- (pca@stdev)^2
+  varExplained <- eigValues / total_variance
+  sim_SDs <- (varExplained * 100)[1:numPC]
+  return(sim_SDs)
+}
+
+## function: calculate centroid distance
+CalculateCentroidDistance <- function(sim_PCs, withSD = NULL, sim_SDs = NULL){
+  centroid_list <- as.vector(apply(sim_PCs, 2, mean)) # calculate centroid for all PCs
+  centroid_matrix <- sweep(sim_PCs, 2, centroid_list) # create matrix with centroid in the center (by substraction of centroid list)
+  # Calculate distance
+  if (!is.null(withSD)) {
+    distance <- sqrt(rowSums((sweep(centroid_matrix, 2, sim_SDs, "*"))^2)) # with SD correction (if)
+  } else {
+    distance <- sqrt(rowSums(centroid_matrix^2)) # normal
+  }
+  distance <- as.matrix(distance)
+  return(distance)
+}
+
+
+### 3. Shannon
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  return(seu)
+}
+
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 45)[1]
+  #co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  PCopt <- co1
+  return(1:PCopt)
+}
+
+scBubblePlotPipeline <- function(d){
+  # Select the 5,000 most variable genes
+  d <- FindVariableFeatures(object = d, selection.method = "vst", nfeatures = 5000)
+  # Normalize the data using SCTransform
+  d <- SCTransform(d, variable.features.n = 5000)
+  # Run PCA
+  d <- RunPCA(object = d, npcs = 50, features = VariableFeatures(object = d))
+  # select optimal dims
+  selected_dims <- GetPCs(d)
+  
+  ### scBubbleTree
+    # Extract the PCA embeddings
+    A <- d@reductions$pca@cell.embeddings[, 1:length(selected_dims)]
+    m <- d@meta.data
+    d_ccl <- list(A = A, m = m)
+    
+    #k-means
+    b_k <- get_k(B_gap = 10,
+             ks = 1:30, # no. of ks
+             x = A, # input matrix
+             n_start = 50, 
+             iter_max = 100,
+             kmeans_algorithm = "MacQueen", 
+             cores = 2)
+    
+    ## find optimal k
+    gap_stats <- b_k$gap_stats_summary
+    gap_diff <- diff(gap_stats$gap_mean) / gap_stats$gap_mean[-length(gap_stats$gap_mean)]
+    optimal_k <- which(gap_diff < 0.01)[1] # First k where % change < 1%
+    
+    k <- get_bubbletree_kmeans(x = A,
+                           k = optimal_k,
+                           cores = 1,
+                           B = 300,
+                           N_eff = 200,
+                           round_digits = 1,
+                           show_simple_count = FALSE,
+                           kmeans_algorithm = "MacQueen")
+    return(k)
+}
+
+```
+
+
+
+```{r}
+
+# Benchmarking setup
+cell_counts <- c(200, 400, 600, 800, 1000, 1500, 2000)
+iter <- 5
+results <- list()
+
+# Benchmarking loop
+for (cells in cell_counts) {
+  for (i in 1:iter) {
+    set.seed(43+i+cells)
+    
+    # Simulated dataset
+    params.groups <- newSplatParams(batchCells = cells, nGenes = 10000)
+    sim <- splatSimulatePaths(params.groups, seed = 42, bcv.common = 0.2, lib.scale = 0.4, 
+                              group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+    
+    # Benchmark CV method
+    bench_cv <- mark({
+      scale_seu <- RunSeuratPipelineCV(sim)
+      cvs <- calculate_CV(scale_seu)
+      mean_CV <- mean(cvs)
+    }, time_unit = "s", memory = TRUE)
+
+    # Benchmark CD method
+    bench_cd <- mark({
+      seu <- simulateSeuOb(sim)
+      PCs <- GetPCs(seu)
+      SDs <- GetSDs(seu, length(PCs))
+      centroid_distances <- CalculateCentroidDistance(PCs, withSD = TRUE, sim_SDs = SDs)
+      mean_CD <- mean(centroid_distances)
+    }, time_unit = "s", memory = TRUE)
+    
+    # Benchmark CD method with no SD
+    bench_cd_noSD <- mark({
+      seu <- simulateSeuOb(sim)
+      PCs <- GetPCs(seu)
+      centroid_distances <- CalculateCentroidDistance(PCs)
+      mean_CD <- mean(centroid_distances)
+    }, time_unit = "s", memory = TRUE)
+
+    # Benchmark Shannon method
+    bench_shannon <- mark({
+      seu <- simulateSeuOb(sim)
+      tree <- tryCatch(scBubblePlotPipeline(seu), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+      if ("tree_meta" %in% names(tree)) { # Check if "tree_meta" exists in the tree
+          results_df <- tree[["tree_meta"]]
+          probs <- results_df$p       # Calculate Shannon entropy
+          SE <- -sum(probs * log2(probs))
+        } else {
+          SE <- 0 # Assign 0 if "tree_meta" is not present
+        }
+    }, time_unit = "s", memory = TRUE)
+
+    # Store results
+    results[[paste0("CV_", cells, "_", i)]] <- bench_cv
+    results[[paste0("CD_", cells, "_", i)]] <- bench_cd
+    results[[paste0("CD_noSD_", cells, "_", i)]] <- bench_cd_noSD
+    results[[paste0("Shannon_", cells, "_", i)]] <- bench_shannon
+  }
+}
+
+#benchmark_results <- results
+#save(benchmark_results, file = "benchmark_results.RData")
+
+# Convert results to a dataframe
+df_results <- do.call(rbind, lapply(names(results), function(name) {
+  data.frame(Method = sub("_\\d+_\\d+$", "", name),
+             Cells = as.numeric(sub(".*_(\\d+)_\\d+$", "\\1", name)),
+             Iteration = as.numeric(sub(".*_(\\d+)$", "\\1", name)),
+             Time = results[[name]]$median,
+             Memory = results[[name]]$mem_alloc)
+}))
+
+# Calculate Mean + SD
+df_aggregated <- df_results %>%
+  group_by(Method, Cells) %>%
+  summarise(
+    Time_mean = mean(Time, na.rm = TRUE),
+    Time_sd = sd(Time, na.rm = TRUE),
+    Memory_mean = mean(as.numeric(gsub("MB", "", gsub("GB", "", Memory))) / ifelse(grepl("MB", Memory), 1024, 1), na.rm = TRUE),
+    Memory_sd = sd(as.numeric(gsub("MB", "", gsub("GB", "", Memory))) / ifelse(grepl("MB", Memory), 1024, 1), na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+
+p1 <- ggplot(df_aggregated, aes(x = Cells, y = Time_mean, color = Method, linetype = Method)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 1) +
+  geom_errorbar(aes(ymin = Time_mean - Time_sd, ymax = Time_mean + Time_sd), width = 50) + 
+  scale_color_manual(values = c("CD" = "#FC8D62", "CD_noSD" = "#e5c494", "CV" = "#8DA0CB", "Shannon" = "#66C2A5"),
+                       labels = c("CD" = "Weighted CD-based", 
+                                  "CD_noSD" = "CD-based", 
+                                  "CV" = "CV-based", 
+                                  "Shannon" = "Shannon Entropy-based")) +
+  scale_linetype_manual(values = c("CD" = "longdash", "CD_noSD" = "dotted", "CV" = "dashed", "Shannon" = "twodash")) + 
+  labs(x = "Cell Count", y = "Elapsed Time [s]") +
+  theme_bw() +
+  theme(legend.position = "none", legend.title = element_blank())
+
+
+p2 <- ggplot(df_aggregated, aes(x = Cells, y = Memory_mean, color = Method, linetype = Method)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 1) +
+  geom_errorbar(aes(ymin = Memory_mean - Memory_sd, ymax = Memory_mean + Memory_sd), width = 50) +
+  scale_color_manual(values = c("CD" = "#FC8D62", "CD_noSD" = "#e5c494", "CV" = "#8DA0CB", "Shannon" = "#66C2A5"),
+                       labels = c("CD" = "Weighted CD-based", 
+                                  "CD_noSD" = "CD-based", 
+                                  "CV" = "CV-based", 
+                                  "Shannon" = "Shannon Entropy-based")) +
+  scale_linetype_manual(values = c("CD" = "longdash", "CD_noSD" = "dotted", "CV" = "dashed", "Shannon" = "twodash")) + 
+  labs(x = "Cell Count", y = "Memory Usage [GB]") +
+  theme_bw() +
+  theme(legend.position = "none",
+        legend.text = element_text(size = 9), 
+        legend.title = element_text(size = 11))
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_Benchmark_Time.png", plot = p1, dpi = 1200, width = 3.5, height = 2.5)
+ggsave("Simulated_Benchmark_Memory.png", plot = p2, dpi = 1200, width = 3.5, height = 2.5)
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_Benchmark_Legend.png", plot = p2, dpi = 1200, width = 6, height = 2.5)
+```
+
