@@ -1,0 +1,650 @@
+---
+title: "Simulation_Paths_many_cell_count_corr"
+output: html_document
+date: "2025-02-17"
+---
+
+In this document, i am testing, whether my methods are dependent on cell count. I simulate datasets for H3 in a range of 200 - 1000 cells and then run my methods
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_libraries, include=FALSE}
+#Load libraries
+library(splatter)
+library(SingleCellExperiment)
+library(scater)
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(ggbreak)
+library(scBubbletree)
+library(ggtree)
+library(patchwork)
+library(dplyr)
+library(sctransform)
+library(RColorBrewer)
+
+options(future.globals.maxSize = 10 * 1024^4)
+
+# set seed
+set.seed(43)
+
+# color palette
+gradient_palette <- brewer.pal(n = 5, name = "Greys")
+
+
+
+```
+
+
+
+```{r FunctionsCV, echo=FALSE}
+### Prep: functions
+
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  return(seu)
+}
+
+
+## run seurat pipeline 
+RunSeuratPipeline <- function(seu_sim){
+  # get all genes
+  all.genes <- rownames(seu_sim)
+  # normalize 
+  seu_sim <- NormalizeData(seu_sim, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu_sim <- FindVariableFeatures(seu_sim, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu_sim <- ScaleData(seu_sim, features = all.genes)
+  # get scale.data (absolute values)
+  scale_matrix <- abs(as.data.frame(seu_sim@assays$RNA$scale.data))
+  return(scale_matrix)
+}
+
+
+## calculate CVs (faster)
+# 1. Function to calculate CV for a single sample
+calculate_CV <- function(sample) {
+  # Calculate SD and mean for each gene, ignoring zeros
+  sd_ex <- apply(sample, 1, function(x) sd(x[x > 0]))
+  mean_ex <- apply(sample, 1, function(x) mean(x[x > 0]))
+  # Calculate CV
+  cv <- sd_ex / mean_ex
+  return(cv)
+}
+#2. full function
+
+CalculateCVs <- function(scale_sim){
+  scale_sim <- scale_sim[rowSums(scale_sim != 0) > 0, ]
+  scale_sim <- as.data.frame(t(scale_sim))
+  cv_vector <- calculate_CV(scale_sim)
+  return(cv_vector)
+}
+
+
+CV_sum_calc <- function(CV_df) {
+  # std
+  std_cv <- apply(CV_df, 2, sd, na.rm=TRUE)
+  # cv
+  cv_cv <- apply(CV_df, 2, sd, na.rm=TRUE) / (apply(CV_df, 2, mean, na.rm=TRUE))
+  # mean
+  mean_cv <- apply(CV_df, 2, mean, na.rm=TRUE)
+  # median
+  med_cv <- apply(CV_df, 2, median, na.rm=TRUE)
+  # Append to dataframe
+  sum_df <- as.data.frame(rbind(std_cv, cv_cv, 
+                                mean_cv, med_cv))
+}
+
+```
+
+```{r RunMeanCV, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+
+iter <- 50
+
+# Run CV method
+## initialize lists to store results
+HetList <- vector("list", length = iter)
+
+## run for loop. for loop performs simulation, and then calculates the CV metrics from the scale data and saves them in the lists
+for (i in 1:iter){
+  
+  set.seed(43+i)
+  seed <- 43+i
+  
+  cells <- sample(200:1000, 1)
+    
+  ### 0. set parameters: de extra, bcv.common and lib scale v3
+  ### 1. simulate datasets
+  
+  #H3 
+  params.groups <- newSplatParams(batchCells = cells, nGenes = 10000)
+  sim <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+        
+  seu <- simulateSeuOb(sim)
+  
+  ### 2. run seurat pipeline to get scaled.matrix
+  scale_seu <- RunSeuratPipeline(seu)
+  
+  ### 4. run CV calc
+  CV <- CalculateCVs(scale_seu)
+  
+  ### 5. save results in dataframes
+  HetList[[i]] <- CV
+}
+  
+
+### Summary 
+
+#### Do mean and save mean values + cell count
+
+CV_cell_count <- data.frame(
+  cells = integer(),
+  mean_cv = numeric()
+)
+
+# Loop through each iteration and calculate mean CV and number of cells
+for (i in seq_along(HetList)) {
+  num_cells <- length(HetList[[i]])  # Number of cells
+  mean_cv <- mean(HetList[[i]])      # Mean CV
+  CV_cell_count <- rbind(CV_cell_count, data.frame(cells = num_cells, mean_cv = mean_cv))
+}
+
+
+
+### Check cell count correlation
+p <- ggplot(CV_cell_count, aes(x = cells, y = mean_cv)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = T, color = "blue", linewidth = 1) +  # Add line
+  stat_cor(method = "pearson") +
+  xlab("Cell count") + 
+  ylab("Mean CV") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(min(CV_cell_count$cells), max(CV_cell_count$cells)+20)
+
+
+# save(CV_cell_count, file = "CV_cell_count.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_CVvsCounts.png", plot = p, dpi = 1200, width = 3, height = 2.5)
+
+```
+
+
+## Centroid method
+
+```{r Centroid_functions_opt, include=FALSE}
+
+## Functions
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu, npcs = 30)
+  return(seu)
+}
+
+## function: extract PCs and SDs
+# extract PCs
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 50)[1]
+  co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+    if (co2 < 5) {
+    co2 <- NULL  # Ensure co1 has at least 5 PCs, else return NULL
+    }
+  pcs <- min(co1, co2, na.rm = T)
+  PCs <- as.data.frame(seu_object@reductions$pca@cell.embeddings[,c(1:pcs)])
+  return(PCs)
+}
+
+# extract SDs
+GetSDs <- function(seu_object, numPC){
+  mat <- seu_object@assays$RNA$scale.data
+  pca <- seu_object@reductions$pca
+  total_variance <- sum(matrixStats::rowVars(mat))
+  eigValues <- (pca@stdev)^2
+  varExplained <- eigValues / total_variance
+  sim_SDs <- (varExplained * 100)[1:numPC]
+  return(sim_SDs)
+}
+
+## function: calculate centroid distance
+CalculateCentroidDistance <- function(sim_PCs, withSD = NULL, sim_SDs = NULL){
+  centroid_list <- as.vector(apply(sim_PCs, 2, mean)) # calculate centroid for all PCs
+  centroid_matrix <- sweep(sim_PCs, 2, centroid_list) # create matrix with centroid in the center (by substraction of centroid list)
+  # Calculate distance
+  if (!is.null(withSD)) {
+    distance <- sqrt(rowSums((sweep(centroid_matrix, 2, sim_SDs, "*"))^2)) # with SD correction (if)
+  } else {
+    distance <- sqrt(rowSums(centroid_matrix^2)) # normal
+  }
+  distance <- as.matrix(distance)
+  return(distance)
+}
+
+```
+
+```{r Run_Centroid_noSD, fig.height=4, fig.width=6}
+
+iter <- 50
+
+#### Method: With SD correction and optimal PCs------------
+
+HetList <- vector("list", length = iter)
+
+## run for loop. for loop performs simulation, and then calculates CD and saves them in the lists
+for (i in 1:iter){
+  
+  set.seed(43+i)
+  seed <- 43+i
+  
+  cells <- sample(200:1000, 1)
+    
+  ### 0. set parameters: de extra, bcv.common and lib scale v3
+  ### 1. simulate datasets
+  
+  #H3 
+  params.groups <- newSplatParams(batchCells = cells, nGenes = 10000)
+  sim <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  
+  ### 1. simulate datasets      
+  seu <- simulateSeuOb(sim)
+
+  ### 2. extract PCs
+  PCs <- GetPCs(seu)
+
+  
+  ### 3. calculate distance to centroid
+  centroid <- CalculateCentroidDistance(PCs)
+
+  
+  ### 4. save results in dataframes
+  HetList[[i]] <- centroid
+}
+
+### Summary 
+
+#### Do mean and save mean values + cell count
+
+CDnoSD_cell_count <- data.frame(
+  cells = integer(),
+  mean_cd = numeric()
+)
+
+# Loop through each iteration and calculate mean CV and number of cells
+for (i in seq_along(HetList)) {
+  num_cells <- length(HetList[[i]])  # Number of cells
+  mean_cd <- mean(HetList[[i]])      # Mean CV
+  CDnoSD_cell_count <- rbind(CDnoSD_cell_count, data.frame(cells = num_cells, mean_cd = mean_cd))
+}
+
+
+
+p <- ggplot(CDnoSD_cell_count, aes(x = cells, y = mean_cd)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = T, color = "blue", linewidth = 1) +  # Add line
+  stat_cor(method = "pearson") +
+  xlab("Cell count") + 
+  ylab("Mean CD") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(min(CDnoSD_cell_count$cells), max(CDnoSD_cell_count$cells)+20)
+p
+
+# save(CDnoSD_cell_count, file = "CDnoSD_cell_count.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_CDnoSDvsCounts.png", plot = p, dpi = 1200, width = 3, height = 2.5)
+
+```
+
+```{r Run_Centroid_opt, fig.height=4, fig.width=6}
+
+iter <- 50
+
+#### Method: With SD correction and optimal PCs------------
+
+HetList <- vector("list", length = iter)
+
+## run for loop. for loop performs simulation, and then calculates CD and saves them in the lists
+for (i in 1:iter){
+  
+  set.seed(43+i)
+  seed <- 43+i
+  
+  cells <- sample(200:1000, 1)
+    
+  ### 0. set parameters: de extra, bcv.common and lib scale v3
+  ### 1. simulate datasets
+  
+  #H3 
+  params.groups <- newSplatParams(batchCells = cells, nGenes = 10000)
+  sim <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  
+  ### 1. simulate datasets      
+  seu <- simulateSeuOb(sim)
+
+  ### 2. extract PCs
+  PCs <- GetPCs(seu)
+  SDs <- GetSDs(seu, length(PCs))
+
+  
+  ### 3. calculate distance to centroid
+  centroid <- CalculateCentroidDistance(PCs, withSD = TRUE, sim_SDs = SDs)
+
+  
+  ### 4. save results in dataframes
+  HetList[[i]] <- centroid
+}
+
+### Summary 
+
+#### Do mean and save mean values + cell count
+
+CD_cell_count <- data.frame(
+  cells = integer(),
+  mean_cd = numeric()
+)
+
+# Loop through each iteration and calculate mean CV and number of cells
+for (i in seq_along(HetList)) {
+  num_cells <- length(HetList[[i]])  # Number of cells
+  mean_cd <- mean(HetList[[i]])      # Mean CV
+  CD_cell_count <- rbind(CD_cell_count, data.frame(cells = num_cells, mean_cd = mean_cd))
+}
+
+
+
+### Check cell count correlation
+p <- ggplot(CD_cell_count, aes(x = cells, y = mean_cd)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = T, color = "blue", linewidth = 1) +  # Add line
+  stat_cor(method = "pearson") +
+  xlab("Cell count") + 
+  ylab("Weighted Mean CD") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(min(CD_cell_count$cells), max(CD_cell_count$cells)+20)
+p
+
+# save(CD_cell_count, file = "CD_cell_count.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_CDvsCounts.png", plot = p, dpi = 1200, width = 3, height = 2.5)
+
+```
+
+
+## Euclidean Distance method
+
+```{r Euclidean_functions, include=FALSE}
+
+## functions: simulations -> seu objects
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu)
+  return(seu)
+}
+
+## check euclidean
+GetEDmean <- function(seu){
+  Embs <- Embeddings(object = seu[["pca"]])
+  Embs <-  as.data.frame(Embs)
+  ED_mean <- mean(as.matrix(dist(Embs, method = "euclidean")))
+  return(ED_mean)
+}
+
+```
+
+```{r Run_Euclidean_opt, fig.height=4, fig.width=6}
+
+iter <- 50
+
+#### 
+
+HetList <- vector("list", length = iter)
+
+## run for loop. for loop performs simulation, and then calculates ED and saves them in the lists
+for (i in 1:iter){
+  
+  set.seed(43+i)
+  seed <- 43+i
+  
+  cells <- sample(200:1000, 1)
+  CellList[[i]] <- cells
+    
+  ### 0. set parameters: de extra, bcv.common and lib scale v3
+  ### 1. simulate datasets
+  
+  #H3 
+  params.groups <- newSplatParams(batchCells = cells, nGenes = 10000)
+  sim <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+  
+  ### 1. simulate datasets      
+  seu <- simulateSeuOb(sim)
+
+  ### 2. Get ED
+  ED_mean <- GetEDmean(seu)
+
+  ### 3. save results in dataframes
+  HetList[[i]] <- ED_mean
+}
+
+### Summary 
+
+#### Do mean and save mean values + cell count
+
+ED_cell_count <- data.frame(
+  cells = unlist(CellList),
+  mean_ed = unlist(HetList)
+)
+
+
+
+### Check cell count correlation
+p <- ggplot(ED_cell_count, aes(x = cells, y = mean_ed)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = T, color = "blue", linewidth = 1) +  # Add line
+  stat_cor(method = "pearson") +
+  xlab("Cell count") + 
+  ylab("Mean ED") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(min(ED_cell_count$cells), max(ED_cell_count$cells)+20)
+p
+
+# save(ED_cell_count, file = "ED_cell_count.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_EDvsCounts.png", plot = p, dpi = 1200, width = 3, height = 2.5)
+
+```
+
+
+## Shannon Entropy
+
+```{r SE_functions}
+
+## functions: simulated counts -> seu object
+simulateSeuOb <- function(sim){
+  count_matrix <- counts(sim)
+  seu <- CreateSeuratObject(counts = count_matrix)
+  # normalize 
+  seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000)
+  # FVF
+  seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+  # scale
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu, npcs = 30)
+  return(seu)
+}
+
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 45)[1]
+  #co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  PCopt <- co1
+  return(1:PCopt)
+}
+
+scBubblePlotPipeline <- function(d){
+  # Select the 5,000 most variable genes
+  d <- FindVariableFeatures(object = d, selection.method = "vst", nfeatures = 5000)
+  # Normalize the data using SCTransform
+  d <- SCTransform(d, variable.features.n = 5000)
+  # Run PCA
+  d <- RunPCA(object = d, npcs = 30, features = VariableFeatures(object = d))
+  # select optimal dims
+  selected_dims <- GetPCs(d)
+  
+  ### scBubbleTree
+    # Extract the PCA embeddings
+    A <- d@reductions$pca@cell.embeddings[, 1:length(selected_dims)]
+    m <- d@meta.data
+    d_ccl <- list(A = A, m = m)
+    
+    #k-means
+    b_k <- get_k(B_gap = 10,
+             ks = 1:30, # no. of ks
+             x = A, # input matrix
+             n_start = 50, 
+             iter_max = 100,
+             kmeans_algorithm = "MacQueen", 
+             cores = 2)
+    
+    ## find optimal k
+    gap_stats <- b_k$gap_stats_summary
+    gap_diff <- diff(gap_stats$gap_mean) / gap_stats$gap_mean[-length(gap_stats$gap_mean)]
+    optimal_k <- which(gap_diff < 0.01)[1] # First k where % change < 1%
+    
+    k <- get_bubbletree_kmeans(x = A,
+                           k = optimal_k,
+                           cores = 1,
+                           B = 300,
+                           N_eff = 200,
+                           round_digits = 1,
+                           show_simple_count = FALSE,
+                           kmeans_algorithm = "MacQueen")
+    return(k)
+}
+
+
+```
+
+```{r Run_SE}
+
+## initialize lists to store results
+iter <- 50
+
+HetList <- vector("list", length = iter)
+CellList <- vector("list", length = iter)
+
+## run for loop. for loop performs simulation, and then calculates SE and saves them in the lists
+for (i in 1:iter){
+  
+  set.seed(i)
+  seed <- i
+  
+  cells <- sample(200:1000, 1)
+  CellList[[i]] <- cells
+    
+  ### 0. set parameters: de extra, bcv.common and lib scale v3
+  ### 1. simulate datasets
+  
+  #H3 
+  params.groups <- newSplatParams(batchCells = cells, nGenes = 10000)
+  sim <- splatSimulatePaths(params.groups, seed = seed,
+                               bcv.common = 0.2, lib.scale = 0.4, group.prob = 1, de.prob = 0.5, de.facLoc = 0.5, path.from = 0, verbose = FALSE)
+                               
+    
+  ### 1. simulate datasets
+  seu <- simulateSeuOb(sim)
+  
+  
+  ### 2. run scBubbletree
+  tree <- tryCatch(scBubblePlotPipeline(seu), error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e))
+  
+  ### 3. calculate SE
+  if ("tree_meta" %in% names(tree)) { # Check if "tree_meta" exists in the tree
+      results_df <- tree[["tree_meta"]]
+      probs <- results_df$p       # Calculate Shannon entropy
+      SE <- -sum(probs * log2(probs))
+    } else {
+      SE <- 0 # Assign 0 if "tree_meta" is not present
+    }
+  
+  
+  
+  
+  ### 4. Save in dataframe
+  HetList[[i]] <- SE
+}
+
+
+### Summary
+#### Do mean and save mean values + cell count
+
+SE_cell_count <- data.frame(
+  cells = unlist(CellList),
+  SE = unlist(HetList)
+)
+
+
+
+#save(SE_all_sum, file = "SE_all_sum_1%.RData")
+
+# SE_cell_count0.1 <- SE_cell_count # R = 0.81
+# SE_cell_count1 <- SE_cell_count  # R = 0.39
+# SE_cell_count0.5 <- SE_cell_count # R = 0.68
+
+SE_cell_count <- SE_cell_count1
+
+### Check cell count correlation
+p <- ggplot(SE_cell_count, aes(x = cells, y = SE)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = T, color = "blue", linewidth = 1) +  # Add line
+  stat_cor(method = "pearson") +
+  xlab("Cell count") + 
+  ylab("Shannon Entropy") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(min(SE_cell_count$cells), max(SE_cell_count$cells)+20)
+p
+
+# save(SE_cell_count, file = "SE_cell_count_1%.RData")
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Simulated")
+ggsave("Simulated_SEvsCounts_1.png", plot = p, dpi = 1200, width = 3, height = 2.5)
+
+
+```
