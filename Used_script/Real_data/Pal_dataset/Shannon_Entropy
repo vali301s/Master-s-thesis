@@ -1,0 +1,545 @@
+### For figure 7C+E
+
+---
+title: "BubbleTree_Shannon_Reed"
+output: html_document
+date: "2025-01-10"
+---
+
+```{r setup, include=FALSE}
+knitr::knit_global()
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r load_libraries, include=FALSE}
+# Load required package
+#BiocManager::install("scBubbletree")
+library(scBubbletree)
+library(ggplot2)
+library(ggtree)
+library(patchwork)
+#BiocManager::install("glmGamPoi")
+# install sctransform from Github
+#install.packages("sctransform")
+library(Seurat)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(sctransform)
+library(ggpmisc)
+library(caret)
+library(ggpubr)
+library(rstatix)
+
+options(future.globals.maxSize = 10 * 1024^4)
+
+setwd("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/1%threshold")
+```
+
+```{r load_datasets, include=FALSE}
+# load datasets
+SeuratObject_NormEpiSub <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Pal_GSEA/SeuratObject_NormEpiSub.rds")
+SeuratObject_ERTotalTum <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Data_Pal2021_Breast/Seu_Pal_ER.rds")
+SeuratObject_HER2Tum <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Data_Pal2021_Breast/Seu_Pal_HER2.rds")
+SeuratObject_TNBCTum <- readRDS("D:/Dropbox/Master Thesis/Datasets/Pal(EMBO)/Data_Pal2021_Breast/Seu_Pal_TNBC.rds")
+
+```
+
+```{r QC}
+### Normal
+# filter
+SeuratObject_NormEpiSub <- subset(SeuratObject_NormEpiSub, subset = nFeature_RNA > 250)
+table(SeuratObject_NormEpiSub@meta.data[["level1_global"]], SeuratObject_NormEpiSub@meta.data[["patient_id"]])
+
+# remove bad patient
+SeuratObject_NormEpiSub <- subset(SeuratObject_NormEpiSub, subset = patient_id != "N-MH0064-Epi")
+
+
+## subset normal into 3 subpopulations
+SeuratObject_Norm_B <- subset(SeuratObject_NormEpiSub, subset = level1_global_new == "Basal")
+SeuratObject_Norm_LP <- subset(SeuratObject_NormEpiSub, subset = level1_global_new == "LP")
+SeuratObject_Norm_HR <- subset(SeuratObject_NormEpiSub, subset = level1_global_new == "HR")
+
+### TUmor
+# filter
+SeuratObject_ERTotalTum <- subset(SeuratObject_ERTotalTum, subset = nFeature_RNA > 250)
+SeuratObject_HER2Tum <- subset(SeuratObject_HER2Tum, subset = nFeature_RNA > 250)
+SeuratObject_TNBCTum <- subset(SeuratObject_TNBCTum, subset = nFeature_RNA > 250)
+
+
+```
+
+```{r functions}
+select_dims <- function(object) {
+  pct <- object[["pca"]]@stdev / sum(object[["pca"]]@stdev) * 100
+  PCopt <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  return(1:PCopt)
+}
+
+scBubblePlotPipeline <- function(d){
+  # Select the 5,000 most variable genes
+  d <- FindVariableFeatures(object = d, selection.method = "vst", nfeatures = 5000)
+  # Normalize the data using SCTransform
+  d <- SCTransform(d, variable.features.n = 5000)
+  # Run PCA
+  d <- RunPCA(object = d, npcs = 50, features = VariableFeatures(object = d))
+  # select optimal dims
+  selected_dims <- select_dims(d)
+  
+  ### scBubbleTree
+    # Extract the PCA embeddings
+    A <- d@reductions$pca@cell.embeddings[, 1:length(selected_dims)]
+    m <- d@meta.data
+    d_ccl <- list(A = A, m = m)
+    
+    #k-means
+    b_k <- get_k(B_gap = 10,
+             ks = 1:30, # no. of ks
+             x = A, # input matrix
+             n_start = 50, 
+             iter_max = 100,
+             kmeans_algorithm = "MacQueen", 
+             cores = 2)
+    
+    ## find optimal k
+    gap_stats <- b_k$gap_stats_summary
+    gap_diff <- diff(gap_stats$gap_mean) / gap_stats$gap_mean[-length(gap_stats$gap_mean)]
+    optimal_k <- which(gap_diff < 0.01)[1] # First k where % change < 1%
+    
+    k <- get_bubbletree_kmeans(x = A,
+                           k = optimal_k,
+                           cores = 1,
+                           B = 300,
+                           N_eff = 200,
+                           round_digits = 1,
+                           show_simple_count = FALSE,
+                           kmeans_algorithm = "MacQueen")
+    return(k)
+}
+
+
+CalcShannonEntropy <- function(trees_list){
+  # Initialize Shannon entropy list
+  Shannon_list <- c()
+
+  # Loop through the list of trees
+  for (i in seq_along(trees_list)) {
+    # Extract the current tree
+    tree <- trees_list[[i]]
+
+    # Check if "tree_meta" exists in the current tree
+    if ("tree_meta" %in% names(tree)) {
+      # Extract tree metadata
+      results_df <- tree[["tree_meta"]]
+
+      # Calculate Shannon entropy
+      probs <- results_df$p
+      Shannon_list[i] <- -sum(probs * log2(probs), na.rm = TRUE)
+    } else {
+      # Assign 0 if "tree_meta" is not present
+      Shannon_list[i] <- 0
+    }
+  }
+   return(Shannon_list)
+}
+```
+
+```{r BubbleTree_Normals}
+### Normal ------------------------------------------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_NormEpiSub@meta.data$patient_id))
+# Split so by patient
+SeuratObject_NormEpiSub_split <- SplitObject(SeuratObject_NormEpiSub, split.by = "patient_id")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(normal_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_NormEpiSub_split)) {
+    # split patients
+    patient <- SeuratObject_NormEpiSub_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(patient),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  EMBO_Normal_Trees_List <- trees_list
+  names(EMBO_Normal_Trees_List) <- normal_ID
+  save(EMBO_Normal_Trees_List, file = "EMBO_Normal_Trees_List.RData")
+
+
+### Normal B ------------------------------------------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_Norm_B@meta.data$patient_id))
+# Split so by patient
+SeuratObject_Norm_B_split <- SplitObject(SeuratObject_Norm_B, split.by = "patient_id")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(normal_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_Norm_B_split)) {
+    # split patients
+    patient <- SeuratObject_Norm_B_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(patient),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  EMBO_Normal_B_Trees_List <- trees_list
+  EMBO_Normal_B_Trees_List <- lapply(EMBO_Normal_B_Trees_List, function(x) if (is.null(x)) 0 else x) # some patients didnt split into 2 or more k -> 0 --> SE = 0
+  names(EMBO_Normal_B_Trees_List) <- normal_ID
+  save(EMBO_Normal_B_Trees_List, file = "EMBO_Normal_B_Trees_List.RData")
+
+  
+  
+### Normal LP ------------------------------------------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_Norm_LP@meta.data$patient_id))
+# Split so by patient
+SeuratObject_Norm_LP_split <- SplitObject(SeuratObject_Norm_LP, split.by = "patient_id")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(normal_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_Norm_LP_split)) {
+    # split patients
+    patient <- SeuratObject_Norm_LP_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(patient),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  EMBO_Normal_LP_Trees_List <- trees_list
+  names(EMBO_Normal_LP_Trees_List) <- normal_ID
+  save(EMBO_Normal_LP_Trees_List, file = "EMBO_Normal_LP_Trees_List.RData")  
+  
+  
+  
+### Normal HR ------------------------------------------
+# get IDs
+normal_ID <- as.character(unique(SeuratObject_Norm_HR@meta.data$patient_id))
+# Split so by patient
+SeuratObject_Norm_HR_split <- SplitObject(SeuratObject_Norm_HR, split.by = "patient_id")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(normal_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_Norm_HR_split)) {
+    # split patients
+    patient <- SeuratObject_Norm_HR_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(patient),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  EMBO_Normal_HR_Trees_List <- trees_list
+  names(EMBO_Normal_HR_Trees_List) <- normal_ID
+  save(EMBO_Normal_HR_Trees_List, file = "EMBO_Normal_HR_Trees_List.RData")  
+  
+```
+
+```{r visualization_NvsNs}
+# load
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_Normal_Trees_List.RData")
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_Normal_B_Trees_List.RData")
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_Normal_LP_Trees_List.RData")
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_Normal_HR_Trees_List.RData")
+
+normal_ID <- names(EMBO_Normal_B_Trees_List)
+
+# 2. Calculate Shannon-Entropy from proportions
+Normal_Shannon_df <- CalcShannonEntropy(EMBO_Normal_Trees_List)
+Normal_Shannon_df <- data.frame(SE = Normal_Shannon_df,
+                                patient = normal_ID,
+                                group = rep("All Epi", times = length(Normal_Shannon_df)))
+
+Normal_Shannon_B_df <- CalcShannonEntropy(EMBO_Normal_B_Trees_List)
+Normal_Shannon_B_df <- data.frame(SE = Normal_Shannon_B_df,
+                                patient = normal_ID,
+                                group = rep("Basal", times = length(Normal_Shannon_B_df)))
+
+Normal_Shannon_LP_df <- CalcShannonEntropy(EMBO_Normal_LP_Trees_List)
+Normal_Shannon_LP_df <- data.frame(SE = Normal_Shannon_LP_df,
+                                patient = normal_ID,
+                                group = rep("LP", times = length(Normal_Shannon_LP_df)))
+
+Normal_Shannon_HR_df <- CalcShannonEntropy(EMBO_Normal_HR_Trees_List)
+Normal_Shannon_HR_df <- data.frame(SE = Normal_Shannon_HR_df,
+                                patient = normal_ID,
+                                group = rep("HR", times = length(Normal_Shannon_HR_df)))
+
+Shannon_all_df <- rbind(Normal_Shannon_df, Normal_Shannon_B_df, Normal_Shannon_LP_df, Normal_Shannon_HR_df)
+
+
+ggplot(Shannon_all_df, aes(x = group, y = SE, fill = group)) +
+  geom_boxplot(outlier.shape = NA) +  # Boxplot without outliers
+  geom_jitter(width = 0.2, size = 2, color = "black") +  # Jittered points with black color
+  scale_fill_manual(values = c("#5c8d92", "#b8d7ac", "#a3cdc7", "#97b5c3")) +  # Custom palette
+  labs(
+    x = "Group",
+    y = "Shannon Entropy",
+    fill = "Group"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+
+### Statistical test
+# Check normality
+shapiro.test(Shannon_all_df$SE[Shannon_all_df$group == "All Epi"])
+shapiro.test(Shannon_all_df$SE[Shannon_all_df$group == "Basal"]) #-> not normal
+shapiro.test(Shannon_all_df$SE[Shannon_all_df$group == "LP"]) #-> not normal
+shapiro.test(Shannon_all_df$SE[Shannon_all_df$group == "HR"]) #-> not normal
+
+### Kruskal-Wallis with Dunns post hoc test for multiple comparisons
+Shannon_all_df$group <- factor(Shannon_all_df$group)
+Shannon_all_df$group <- relevel(Shannon_all_df$group, ref = "All Epi") # set All Epi as reference group
+
+kruskal_result <- kruskal.test(SE ~ group, data = Shannon_all_df)
+dunn_test <- dunn_test(SE ~ group, data = Shannon_all_df, p.adjust.method = "bonferroni")
+summary(dunn_test)
+pvalues <- as.vector(dunn_test$p.adj)
+pvalues <- pvalues[c(1,2,3)] # order
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("All Epi", "All Epi", "All Epi"),
+  group2 = c("Basal", "LP", "HR"),
+  y.position = c(4.2, 4.5, 4.8),  # change these values as needed
+  p.adj = pvalues
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+
+Shannon_all_df <- Shannon_all_df %>% mutate(group = factor(group, levels = c("All Epi", "Basal", "LP", "HR")))
+
+p <- ggboxplot(Shannon_all_df, x = "group", y = "SE",
+          fill = "group", 
+          palette = c("#5c8d92", "#b8d7ac", "#a3cdc7", "#97b5c3"),
+          xlab = "Group",
+          ylab = "Shannon Entropy",
+          add = "jitter") +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01) +
+  theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0, 5))
+
+p
+
+
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Pal")
+ggsave(filename = "Pal_SE_NvsN.tiff", plot = p, width = 4, height = 2.5, dpi = 1200)
+```
+
+```{r BubbleTree_Tumors}
+
+### Tumor ER ------------------------------------------
+# get IDs
+patient_ID <- as.character(unique(SeuratObject_ERTotalTum@meta.data$sample))
+# Split so by patient
+SeuratObject_ERTotalTum_split <- SplitObject(SeuratObject_ERTotalTum, split.by = "sample")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(patient_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_ERTotalTum_split)) {
+    # split patients
+    patient <- SeuratObject_ERTotalTum_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- scBubblePlotPipeline(patient)
+}
+  # save
+  EMBO_T_ER_Trees_List <- trees_list
+  names(EMBO_T_ER_Trees_List) <- patient_ID
+  save(EMBO_T_ER_Trees_List, file = "EMBO_T_ER_Trees_List.RData")
+  
+  
+  
+### Tumor HER2 ------------------------------------------
+# get IDs
+patient_ID <- as.character(unique(SeuratObject_HER2Tum@meta.data$sample))
+# Split so by patient
+SeuratObject_HER2Tum_split <- SplitObject(SeuratObject_HER2Tum, split.by = "sample")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(patient_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_HER2Tum_split)) {
+    # split patients
+    patient <- SeuratObject_HER2Tum_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(patient),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  EMBO_T_HER2_Trees_List <- trees_list
+  names(EMBO_T_HER2_Trees_List) <- patient_ID
+  save(EMBO_T_HER2_Trees_List, file = "EMBO_T_HER2_Trees_List.RData")
+  
+  
+### Tumor TNBC ------------------------------------------
+# get IDs
+patient_ID <- as.character(unique(SeuratObject_TNBCTum@meta.data$sample))
+# Split so by patient
+SeuratObject_TNBCTum_split <- SplitObject(SeuratObject_TNBCTum, split.by = "sample")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(patient_ID))
+  
+  # Run scBubbleTree for each patient
+  for (i in 1:length(SeuratObject_TNBCTum_split)) {
+    # split patients
+    patient <- SeuratObject_TNBCTum_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(patient),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  EMBO_T_TNBC_Trees_List <- trees_list
+  names(EMBO_T_TNBC_Trees_List) <- patient_ID
+  save(EMBO_T_TNBC_Trees_List, file = "EMBO_T_TNBC_Trees_List.RData")
+
+```
+
+```{r visualization_NvsT}
+# load
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_T_ER_Trees_List.RData")
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_T_HER2_Trees_List.RData")
+load("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/EMBO/EMBO_T_TNBC_Trees_List.RData")
+
+# do mean of subtypes:
+Normal_mean_Shannon_df <- rbind(Normal_Shannon_B_df, Normal_Shannon_LP_df, Normal_Shannon_HR_df)
+Normal_mean_Shannon_df <- aggregate(Normal_mean_Shannon_df[,1:2], list(Normal_mean_Shannon_df$patient), FUN=mean)
+Normal_mean_Shannon_df <- Normal_mean_Shannon_df[,-1]
+Normal_mean_Shannon_df$group <- rep("Mean Epi")
+
+# 2. Calculate Shannon-Entropy from proportions
+patient_ID <- names(EMBO_T_ER_Trees_List)
+Tumor_ER_Shannon_df <- CalcShannonEntropy(EMBO_T_ER_Trees_List)
+Tumor_ER_Shannon_df <- data.frame(SE = Tumor_ER_Shannon_df,
+                                patient = patient_ID,
+                                group = rep("ER+", times = length(Tumor_ER_Shannon_df)))
+
+patient_ID <- names(EMBO_T_HER2_Trees_List)
+Tumor_HER2_Shannon_df <- CalcShannonEntropy(EMBO_T_HER2_Trees_List)
+Tumor_HER2_Shannon_df <- data.frame(SE = Tumor_HER2_Shannon_df,
+                                patient = patient_ID,
+                                group = rep("HER2+", times = length(Tumor_HER2_Shannon_df)))
+
+patient_ID <- names(EMBO_T_TNBC_Trees_List)
+Tumor_TNBC_Shannon_df <- CalcShannonEntropy(EMBO_T_TNBC_Trees_List)
+Tumor_TNBC_Shannon_df <- data.frame(SE = Tumor_TNBC_Shannon_df,
+                                patient = patient_ID,
+                                group = rep("TNBC", times = length(Tumor_TNBC_Shannon_df)))
+
+
+Shannon_Nmean_vs_T_df <- rbind(Normal_mean_Shannon_df, Tumor_ER_Shannon_df, Tumor_HER2_Shannon_df, Tumor_TNBC_Shannon_df)
+
+
+ggplot(Shannon_Nmean_vs_T_df, aes(x = group, y = SE, fill = group)) +
+  geom_boxplot(outlier.shape = NA) +  # Boxplot without outliers
+  geom_jitter(width = 0.2, size = 2, color = "black") +  # Jittered points with black color
+  scale_fill_manual(values = c("#9dbebb", "#ffb4a2", "#e5989b", "#b5838d")) +  # Custom palette
+  labs(
+    x = "Group",
+    y = "Shannon Entropy",
+    fill = "Group"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+
+
+### Statistical test
+# Check normality
+shapiro.test(Shannon_Nmean_vs_T_df$SE[Shannon_Nmean_vs_T_df$group == "Mean Epi"])
+shapiro.test(Shannon_Nmean_vs_T_df$SE[Shannon_Nmean_vs_T_df$group == "ER+"]) 
+shapiro.test(Shannon_Nmean_vs_T_df$SE[Shannon_Nmean_vs_T_df$group == "HER2+"]) #-> borderline normal. but data points are clearly skewed -> so ill still use kruskal wallis
+shapiro.test(Shannon_Nmean_vs_T_df$SE[Shannon_Nmean_vs_T_df$group == "TNBC"]) 
+
+Shannon_Nmean_vs_T_df$group <- factor(Shannon_Nmean_vs_T_df$group)
+Shannon_Nmean_vs_T_df$group <- relevel(Shannon_Nmean_vs_T_df$group, ref = "Mean Epi") # set All Epi as reference group
+
+kruskal_result <- kruskal.test(SE ~ group, data = Shannon_Nmean_vs_T_df)
+dunn_test <- dunn_test(SE ~ group, data = Shannon_Nmean_vs_T_df, p.adjust.method = "bonferroni")
+summary(dunn_test)
+pvalues <- as.vector(dunn_test$p.adj)
+pvalues <- pvalues[c(1,2,3)] # order
+
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("Mean Epi", "Mean Epi", "Mean Epi"),
+  group2 = c("ER+", "HER2+", "TNBC"),
+  y.position = c(4.0, 4.4, 4.8),  # change these values as needed
+  p.adj = pvalues
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+
+Shannon_Nmean_vs_T_df <- Shannon_Nmean_vs_T_df %>% mutate(group = factor(group, levels = c("Mean Epi", "ER+", "HER2+", "TNBC")))
+
+p <- ggboxplot(Shannon_Nmean_vs_T_df, x = "group", y = "SE",
+          fill = "group", 
+          palette = c("#9dbebb", "#ffb4a2", "#e5989b", "#b5838d"),
+          xlab = "Group",
+          ylab = "Shannon Entropy",
+          add = "jitter") +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01) +
+  theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0, 5))
+
+p
+
+
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Pal")
+ggsave(filename = "Pal_SE_NvsT_sig.tiff", plot = p, width = 4, height = 2.5, dpi = 1200)
+
+
+```
