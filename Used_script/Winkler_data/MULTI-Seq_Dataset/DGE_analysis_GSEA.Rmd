@@ -1,0 +1,983 @@
+### Figure 14 + 15
+
+---
+title: "GSEA_Winkler_topvsbottom"
+output: html_document
+date: "2025-01-20"
+---
+
+```{r setup, include=FALSE}
+knitr::knit_global()
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r load_libraries, include=FALSE}
+# Load required package
+library(Seurat)
+library(MAST)
+library(fgsea)
+library(stats)
+library(msigdbr)
+library(presto)
+library(ggplot2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+library(dplyr)
+library(viridis)
+library(reshape2)
+library(patchwork)
+library(grid)
+
+#Laptop
+load("C:/Users/vali3/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/Winkler/centroid_distances.RData")
+load("C:/Users/vali3/Dropbox/Master Thesis/Seuratdata_PDX/seu_10xv2_PT.RData")
+#PC
+load("D:/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/Winkler/centroid_distances.RData")
+load("D:/Dropbox/Master Thesis/PDX_data/seu_10xv2_PT.RData")
+
+# fix seurat object
+seu_10xv2_PT@assays$RNA@counts <- as(seu_10xv2_PT@assays$RNA@counts, "dgCMatrix")
+# QC
+seu_10xv2_PT <- subset(seu_10xv2_PT, subset = n_genes > 200)
+
+# order of tumors
+desired_order <- c("HCI002", "J55454", "HCI005", "H4272", "HCI011", "HCI001", "H5097", "J2036", "J53353", "HCI010") 
+
+```
+
+```{r functions}
+
+# Identify top/bottom & cells
+# Function to get top or bottom 10% gene IDs
+ExtractCells <- function(df, percent, type = c("top", "bottom")) {
+  # Match the type argument
+  type <- match.arg(type)
+  
+  # Calculate the number of rows corresponding to the specified percentage
+  n <- ceiling(nrow(df) * (percent / 100))
+  
+  # Sort the data based on the specified type
+  sorted_df <- if (type == "top") {
+    df[order(-df[, 2]), ]  # Descending order
+  } else {
+    df[order(df[, 2]), ]   # Ascending order
+  }
+  
+  # Extract the top or bottom percentage of rows
+  result <- head(sorted_df, n)
+  
+  # Return only the gene IDs
+  return(result[, 1])
+}
+
+```
+
+```{r Find_DEGs}
+# 1. Run CD
+# 2. Add CD to patient
+
+# Initialize metadata column for the groups
+seu_10xv2_PT@meta.data$perc.group <- "Other"
+
+tumor_ids <- as.character(unique(seu_10xv2_PT@meta.data$Tumor_ID_updated))
+names(centroid_distances) <- tumor_ids
+
+# add centroid distance to metadata
+centroid_df <- do.call(rbind, centroid_distances)
+colnames(centroid_df) <- "wCD"
+centroid_df <- centroid_df[order(match(rownames(centroid_df), rownames(seu_10xv2_PT@meta.data))), , drop = FALSE]
+seu_10xv2_PT@meta.data$wCD <- centroid_df
+
+FeaturePlot(object = seu_10xv2_PT, features = 'wCD')
+
+
+# Loop through each Tumor ID
+
+for (tumor_id in tumor_ids) {
+  # Subset cells for the current Tumor ID
+  tumor_cells <- which(seu_10xv2_PT@meta.data$Tumor_ID_updated == tumor_id)
+  tumor_cd <- centroid_distances[[tumor_id]]
+  
+  # Create a data frame for the CD scores of the current tumor
+  cell_ids <- rownames(tumor_cd)
+  df_CD <- data.frame(cell_id = cell_ids, CD_score = tumor_cd[, 1])  # Adjust if CD_score is not the first column
+  
+  # Extract top and bottom 10% for the current tumor
+  top_cells <- ExtractCells(df_CD, percent = 10, type = "top")
+  bottom_cells <- ExtractCells(df_CD, percent = 10, type = "bottom")
+  
+  # Update metadata for top and bottom cells
+  seu_10xv2_PT@meta.data$perc.group[rownames(seu_10xv2_PT@meta.data) %in% top_cells] <- "ITH-high"
+  seu_10xv2_PT@meta.data$perc.group[rownames(seu_10xv2_PT@meta.data) %in% bottom_cells] <- "ITH-low"
+}
+
+# Set new identity for Seurat object
+Idents(seu_10xv2_PT) <- "perc.group"
+
+# Plot the result
+DimPlot(seu_10xv2_PT, cols = c("#bb0c00", "grey", "#00AFBB")) +
+  ggtitle("Top/Bottom 10% heterogenous cells")
+
+# Get a list of all unique group and remove others
+perc.groups <- levels(Idents(seu_10xv2_PT))
+perc.groups <- perc.groups[!perc.groups == 'Other']
+
+
+# 3. Find DEGs
+# Prepare gene sets 
+msigdb <- msigdbr(species = "Homo sapiens", category = "H")
+pathways_list <- split(x = msigdb$gene_symbol, f = msigdb$gs_name)
+
+# Initialize lists to store results
+
+tumors_DEGs_results <- list()
+markers <- list()
+
+# Loop over each tumor id and perform DEG analysis
+for (tumor_id in tumor_ids) {
+  tumor <- subset(seu_10xv2_PT, subset = Tumor_ID_updated == tumor_id)
+  
+  markers <- FindMarkers(
+    object = tumor,
+    ident.1 = "Top%",
+    ident.2 = "Bottom%",
+    test.use = "MAST",
+    latent.vars = "Tumor_ID_updated"
+    )
+  tumors_DEGs_results[[tumor_id]] <- markers
+}
+
+#save
+setwd("D:/Dropbox/Master Thesis/Methods_transcript/GSEA/Top_vs_bottom")
+save(tumors_DEGs_results, file = "tumors10%_DEGs_topvsbottom_latent_results.RData")
+
+
+# 3. Find DEGs (without latent variable)
+
+# Prepare gene sets 
+msigdb <- msigdbr(species = "Homo sapiens", category = "H")
+pathways_list <- split(x = msigdb$gene_symbol, f = msigdb$gs_name)
+
+# Initialize lists to store results
+
+tumors_DEGs_results <- list()
+markers <- list()
+
+# Loop over each tumor id and perform DEG analysis
+for (tumor_id in tumor_ids) {
+  tumor <- subset(seu_10xv2_PT, subset = Tumor_ID_updated == tumor_id)
+  
+  markers <- FindMarkers(
+    object = tumor,
+    ident.1 = "Top%",
+    ident.2 = "Bottom%",
+    test.use = "MAST"
+    )
+  tumors_DEGs_results[[tumor_id]] <- markers
+}
+
+#save
+setwd("D:/Dropbox/Master Thesis/Methods_transcript/GSEA/Top_vs_bottom")
+save(tumors_DEGs_results, file = "tumors10%_DEGs_topvsbottom_results.RData")
+
+
+# Perform global analysis
+
+  tumors_DEGs_results <- FindMarkers(
+    object = seu_10xv2_PT,
+    ident.1 = "Top%",
+    ident.2 = "Bottom%",
+    test.use = "MAST",
+    latent.vars = "Tumor_ID_updated"
+    )
+
+#save
+setwd("D:/Dropbox/Master Thesis/Methods_transcript/GSEA/Top_vs_bottom")
+save(tumors_DEGs_results, file = "tumors10%_global_DEGs_results.RData")
+
+```
+
+```{r Nicer UMAPS}
+### Centroid distance
+UMAP_df <- as.data.frame(seu_10xv2_PT@reductions[["umap"]]@cell.embeddings)
+colnames(UMAP_df) <- c("umap_1", "umap_2")  # Ensure correct column names
+UMAP_df$CentroidDistance <- as.numeric(as.character(seu_10xv2_PT$CentroidDistance))  # Convert to numeric
+
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(1.5, "cm")
+)
+
+p <- ggplot(UMAP_df, aes(x = umap_1, y = umap_2, color = CentroidDistance)) +
+  geom_point(size = 0.3) +  
+  scale_color_gradient(low = "gray", high = "blue") +  # Fix color range
+  guides(
+    x = axis,
+    y = axis,
+    color = guide_colorbar(
+      barwidth = 1, 
+      barheight = 10, 
+      title.position = "top",
+      title.hjust = 0.5
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type = "closed"), size = 0.5),
+    axis.title = element_text(hjust = 0),
+    panel.grid = element_blank(),  
+    panel.background = element_blank(),  
+    panel.border = element_blank(),  
+    plot.background = element_blank(),  
+    axis.ticks = element_blank(),  
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold")  
+  ) +
+  labs(
+    color = "Weighted\nCD",
+    x = "UMAP_1",
+    y = "UMAP_2"
+  ) +
+  theme(
+    legend.text = element_text(size = 12), 
+    legend.title = element_text(size = 14)
+  ) +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL)
+
+p
+
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+ggsave(filename = "UMAP_wCD.tiff", plot = p, width = 4.6, height = 3.3, dpi = 1200)
+
+
+
+### Groups
+UMAP_df <- as.data.frame(seu_10xv2_PT@reductions[["umap"]]@cell.embeddings)
+UMAP_df$perc.group <- seu_10xv2_PT$perc.group
+
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(1.5, "cm")
+)
+
+p <- ggplot(UMAP_df, aes(x = umap_1, y = umap_2, color = perc.group)) +
+  geom_point(size = 0.3) +  
+  guides(
+    x = axis,
+    y = axis,
+    color = guide_legend(
+      override.aes = list(size = 2.5)  # Increase legend point size
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type = "closed"), size = 0.5),
+    axis.title = element_text(hjust = 0),
+    panel.grid = element_blank(),  
+    panel.background = element_blank(),  
+    panel.border = element_blank(),  
+    plot.background = element_blank(),  
+    axis.ticks = element_blank(),  
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold")  # Center title
+  ) +
+  scale_color_manual(values = c("#bb0c00", "#00AFBB", "grey")) +
+  labs(
+    color = "Group",
+    x = "UMAP_1",
+    y = "UMAP_2"
+  ) +
+    theme(
+    legend.text = element_text(size = 12), 
+    legend.title = element_text(size = 14)
+  ) +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL)
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+ggsave(filename = "UMAP_PercGroups.tiff", plot = p, width = 4.8, height = 3.3, dpi = 1200)
+
+```
+
+
+```{r NumberDEGs}
+#### 1. No. of DEGS ---------------------------
+
+# thresholds:
+p_val <- 0.05
+log2FC <- 0.5
+
+# Initialize an empty list to store results
+deg_summary <- data.frame(
+  Tumor_ID = character(),
+  Total_DEGs = numeric(),
+  Upregulated_DEGs = numeric(),
+  Downregulated_DEGs = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each tumor ID
+for (tumor_ID in names(tumors_DEGs_results)) {
+  markers <- tumors_DEGs_results[[tumor_ID]]
+  
+  # Count DEGs based on thresholds
+  total_degs <- sum(markers$p_val_adj < p_val & abs(markers$avg_log2FC) > log2FC)
+  up_degs <- sum(markers$p_val_adj < p_val & markers$avg_log2FC > log2FC)
+  down_degs <- sum(markers$p_val_adj < p_val & markers$avg_log2FC < -log2FC)
+  
+  # Append results to the data frame
+  deg_summary <- rbind(
+    deg_summary,
+    data.frame(
+      Tumor_ID = tumor_ID,
+      Total_DEGs = total_degs,
+      Upregulated_DEGs = up_degs,
+      Downregulated_DEGs = down_degs
+    )
+  )
+}
+
+# View results
+print(deg_summary)
+
+# Rename Upregulated_DEGs to ITH_high
+deg_summary$ITH_high <- deg_summary$Upregulated_DEGs
+deg_summary$ITH_low <- deg_summary$Downregulated_DEGs
+
+# Reshape the data into a long format for easier plotting
+deg_summary_long <- melt(deg_summary, 
+                         id.vars = "Tumor_ID", 
+                         measure.vars = c("ITH_high", "ITH_low"), 
+                         variable.name = "Group", 
+                         value.name = "DEG_Count")
+
+# Customize factor levels for plotting order
+deg_summary_long$Group <- factor(deg_summary_long$Group, 
+                                 levels = c("ITH_high", "ITH_low"),
+                                 labels = c("DEGs up in ITH-high", "DEGs up in ITH-low"))
+deg_summary_long$Tumor_ID <- factor(deg_summary_long$Tumor_ID, levels = desired_order)
+
+# Plot side-by-side bar plots
+p <- ggplot(deg_summary_long, aes(x = DEG_Count, y = forcats::fct_rev(Tumor_ID))) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~ Group, ncol = 2, scales = "free_x") +
+  labs(
+    #title = "DEGs Across Tumors",
+    x = "# of DEGs",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10)
+  ) 
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+ggsave(filename = "DEGsperTumour.tiff", plot = p, width = 4, height = 3.5, dpi = 1200)
+
+
+#### 2. Overlaps -------------
+
+#
+#
+#
+
+
+```
+
+```{r Volcano_plot}
+
+# threshold:
+p_val <- 0.05
+log2FC <- 0.5
+
+tumor_ID <- "HCI011"
+#markers <- tumors_DEGs_results[[tumor_ID]] # groups
+markers <- tumors_DEGs_results # global
+
+
+# Ensure that the data frame has the required columns
+# Add a column for the significance threshold
+markers$significance <- "Not Significant"
+markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC > log2FC] <- "Upregulated"
+markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC < -(log2FC)] <- "Downregulated"
+
+# No. of DEGs
+markers$gene <- rownames(markers)
+DEGs_num <- markers[markers$significance %in% c("Upregulated", "Downregulated"),]$gene
+length(DEGs_num)
+length(markers[markers$significance %in% c("Upregulated"),]$gene)
+length(markers[markers$significance %in% c("Downregulated"),]$gene)
+
+# Select the top 30 genes based on adjusted p-value
+top_genes <- markers[markers$significance != "Not Significant", ]
+top_genes <- top_genes[order(markers$p_val_adj), ][1:20, ]
+
+# Create the volcano plot
+# Create the volcano plot
+volcano_plot <- ggplot(markers, aes(x = avg_log2FC, y = -log10(p_val_adj), color = significance)) +
+  geom_point(alpha = 1, size = 0.5) +
+  scale_color_manual(values = c("Upregulated" = "#bb0c00", "Downregulated" = "#00AFBB", "Not Significant" = "gray")) +
+  labs(
+    x = "Log2 Fold Change",
+    y = "-Log10 Adjusted P-Value"
+  ) +
+  theme_bw() +
+  theme(
+    axis.title = element_text(size = 10),
+    legend.position = "none",  # Remove legend
+    panel.grid = element_blank(),  # Remove all grid lines
+  ) +
+  geom_hline(yintercept = -log10(p_val), linetype = "dashed", color = "grey", size = 0.5) +
+  geom_vline(xintercept = c(-log2FC, log2FC), linetype = "dashed", color = "grey", size = 0.5) + 
+  geom_text_repel(data = top_genes, aes(label = gene), size = 1.5, color = "black", max.overlaps = Inf)
+
+# Print the plot
+print(volcano_plot)
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+ggsave(filename = "Volcano_global.tiff", plot = volcano_plot, width = 3.5, height = 2.5, dpi = 1200)
+```
+
+```{r Heatmap_sharedDEGs}
+
+#### Find DEGs shared in at least 3 tumours
+# Define thresholds
+p_val <- 0.05
+log2FC <- 0.5
+
+# Get all tumor IDs
+tumor_IDs <- unique(seu_10xv2_PT$Tumor_ID_updated)
+
+# Store DEGs from all tumors in a named list
+deg_list <- list()
+
+for (tumor_ID in tumor_IDs) {
+  markers <- tumors_DEGs_results[[tumor_ID]]  # Get marker genes for the tumor
+  markers$gene <- rownames(markers)
+  
+  # Ensure data has required columns
+  markers$significance <- "Not Significant"
+  markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC > log2FC] <- "Upregulated"
+  markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC < -log2FC] <- "Downregulated"
+  
+  # Get DEGs (union of upregulated & downregulated genes)
+  tumor_DEGs <- markers %>%
+    filter(significance %in% c("Upregulated", "Downregulated")) %>%
+    pull(gene)
+  
+  # Store DEGs for this tumor
+  deg_list[[tumor_ID]] <- tumor_DEGs
+}
+
+# Combine all DEGs into a single vector
+all_DEGs <- unlist(deg_list)
+
+# Count the occurrence of each gene across tumors
+deg_counts <- table(all_DEGs)
+
+# Select genes that appear in at least 3 tumors
+shared_DEGs <- names(deg_counts[deg_counts >= 3])
+
+# Print number of shared DEGs
+cat("Number of DEGs shared in at least 3 tumors:", length(shared_DEGs), "\n")
+
+# Print first few shared DEGs
+head(shared_DEGs)
+
+
+
+### Plot
+# Subset patient data across all tumors
+patients <- subset(seu_10xv2_PT, subset = Tumor_ID_updated %in% tumor_IDs)
+patients <- subset(patients, subset = perc.group %in% c("ITH-high", "ITH-low"))
+patients <- subset(patients, features = shared_DEGs)
+
+# Normalize and scale data
+patients <- NormalizeData(patients, normalization.method = "LogNormalize", scale.factor = 10000)
+patients <- ScaleData(patients)
+scaled_data <- as.data.frame(patients@assays[["RNA"]]@scale.data)
+
+# Prepare annotation for tumors and ITH group
+annotation <- data.frame(
+  Tumour_ID = patients@meta.data$Tumor_ID_updated,
+  Group = patients@meta.data$perc.group
+)
+
+# Sort the annotation to maintain order in the heatmap
+rownames(annotation) <- rownames(patients@meta.data)
+annotation <- annotation %>% arrange(desc(Group), Tumour_ID)
+sorted_cells <- rownames(annotation)
+valid_cells <- intersect(colnames(scaled_data), sorted_cells)
+scaled_data <- scaled_data[, sorted_cells]
+
+# Define color palettes
+color_palette <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(50)
+annotation_colors <- list(
+  Group = c("ITH-high" = "#bb0c00", "ITH-low" = "#00AFBB"),
+  Tumour_ID = c("HCI002" = "#d9d9d9", "J55454" = "#e8ee88", "HCI005" = "#FCCDE5", "H4272" = "#CCEBC5", "HCI011" = "#BEBADA",
+               "HCI001" = "#FDB462", "H5097" = "#BC80BD", "J2036" = "#8DD3C7", "J53353" = "#80B1D3", "HCI010" = "#1598cc")
+)
+
+# Plot combined heatmap
+p <- pheatmap(
+  scaled_data,
+  annotation_col = annotation,
+  annotation_colors = annotation_colors,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  treeheight_row = 0,
+  border_color = NA,
+  color = color_palette,
+  breaks = seq(-2.5, 2.5, length.out = 51),
+  legend_labels = NA
+)
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+tiff("Heatmap_global_shared3.tiff", width = 4.5, height = 3.5, units = "in", res = 1200)
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
+
+```
+
+
+```{r Heatmap}
+
+# threshold:
+p_val <- 0.05
+log2FC <- 0.5
+
+
+tumor_ID <- desired_order[4] # shuffle through tumors. no DEGS in 2, 8
+markers <- tumors_DEGs_results[[tumor_ID]] # groups
+
+
+# Ensure that the data frame has the required columns
+# Add a column for the significance threshold
+markers$significance <- "Not Significant"
+markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC > log2FC] <- "Upregulated"
+markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC < -(log2FC)] <- "Downregulated"
+
+
+# Get DEGs for Top 10%
+markers$gene <- rownames(markers)
+DEGs_up <- markers[markers$significance == "Upregulated", ]$gene
+# Get DEGs for Bottom 10%
+DEGs_down <- markers[markers$significance == "Downregulated", ]$gene
+# Combine DEGs
+all_DEGs <- union(DEGs_up, DEGs_down)
+length(all_DEGs)
+
+# Subset patient and scale data
+patient <- subset(seu_10xv2_PT, subset = Tumor_ID_updated == tumor_ID)
+patient <- subset(patient, subset = perc.group %in% c("ITH-high", "ITH-low"))
+patient <- subset(patient, features = all_DEGs)
+patient <- NormalizeData(patient, normalization.method = "LogNormalize", scale.factor = 10000)
+patient <- ScaleData(patient)
+scaled_data <- as.data.frame(patient@assays[["RNA"]]@scale.data)
+
+# Prepare annotation
+annotation <- data.frame(perc.group = patient@meta.data["perc.group"])
+annotation <- annotation[order(annotation$perc.group, decreasing = TRUE), , drop = FALSE]
+colnames(annotation) <- "Group"
+
+# Sort df
+sorted_cells <- rownames(annotation)
+scaled_data <- scaled_data[, sorted_cells]
+sorted_DEGS <- rownames(scaled_data)
+
+color_palette <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(50)
+
+annotation_colors <- list(
+  Group = c(
+    "ITH-high" = "#bb0c00", 
+    "ITH-low" = "#00AFBB" 
+  )
+)
+
+# Plot the heatmap
+p <- pheatmap(
+  scaled_data,
+  annotation_col = annotation,
+  annotation_colors = annotation_colors,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  treeheight_row = 0,
+  color = color_palette,
+  breaks = seq(-2.5, 2.5, length.out = 51),
+  border_color = NA,
+  legend_labels = NA
+)
+
+p
+
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA/Individual")
+tiff("Heatmap_HCI010.tiff", width = 6, height = 3, units = "in", res = 1200)
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
+
+```
+
+```{r Heatmap with other}
+
+# threshold:
+p_val <- 0.05
+log2FC <- 0.5
+
+
+tumor_ID <- desired_order[1] # shuffle through tumors. no DEGS in 2, 8
+markers <- tumors_DEGs_results[[tumor_ID]] # groups
+
+
+# Ensure that the data frame has the required columns
+# Add a column for the significance threshold
+markers$gene <- rownames(markers)
+markers$significance <- "Not Significant"
+markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC > log2FC] <- "Upregulated"
+markers$significance[markers$p_val_adj < p_val & markers$avg_log2FC < -(log2FC)] <- "Downregulated"
+
+# Get DEGs for Top 10%
+DEGs_up <- markers[markers$significance == "Upregulated", ]
+# Get DEGs for Bottom 10%
+DEGs_down <- markers[markers$significance == "Downregulated", ]
+# Combine DEGs
+all_DEGs <- union(DEGs_up$gene, DEGs_down$gene)
+DEGS_all <- rbind(DEGs_up, DEGs_down)
+
+
+# Subset patient and scale data
+patient <- subset(seu_10xv2_PT, subset = Tumor_ID_updated == tumor_ID)
+patient <- subset(patient, features = all_DEGs)
+patient <- NormalizeData(patient, normalization.method = "LogNormalize", scale.factor = 10000)
+patient <- ScaleData(patient)
+scaled_data <- as.data.frame(patient@assays[["RNA"]]@scale.data)
+
+# Prepare annotation (with "other" group)
+annotation <- data.frame(
+  perc.group = patient@meta.data["perc.group"],
+  wCD = patient@meta.data["wCD"])
+colnames(annotation) <- c("Group", "CD")
+annotation <- annotation[order(annotation$CD, decreasing = FALSE), , drop = FALSE]
+
+
+# Sort df
+sorted_cells <- rownames(annotation)
+scaled_data <- scaled_data[, sorted_cells]
+
+# Annotation
+'color_palette <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(50)
+
+annotation_colors <- list(
+  Group = c("Top%" = "#bb0c00", "Bottom%" = "#00AFBB", "Other" = "antiquewhite"),
+  CD = colorRampPalette(viridis(50, option = "inferno", direction = -1))(length(annotation$CD))
+)
+
+
+# Plot the heatmap
+p <- pheatmap(
+  scaled_data,
+  annotation_col = annotation,
+  annotation_colors = annotation_colors,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  treeheight_row = 0,
+  color = color_palette,
+  breaks = seq(-2.5, 2.5, length.out = 51)
+)
+
+p'
+
+# Define color scales
+group_colors <- c("ITH-high" = "#bb0c00", "ITH-low" = "#00AFBB", "Other" = "antiquewhite")  # Discrete colors
+cd_gradient <- colorRamp2(
+  breaks = seq(min(annotation$CD), max(annotation$CD), length.out = 3),  # 3 breakpoints
+  colors = c("#EDD9A3", "#EA4F88", "#4B2991")  # Gradient colors
+)
+
+# Define top annotation with reversed order (CD first, then Group)
+top_annotation <- HeatmapAnnotation(
+  CD = annotation$CD,        # Continuous annotation
+  Group = annotation$Group,  # Discrete annotation
+  col = list(
+    Group = group_colors,    # Map Group to discrete colors
+    CD = cd_gradient         # Map CD to continuous gradient
+  ),
+  annotation_name_side = "right",  # Place annotation names on the left
+  annotation_legend_param = list(
+    Group = list(title = "Group"),  # Legend title for Group
+    CD = list(title = "wCD",         # Legend title for CD
+              legend_direction = "vertical",  # Rotate CD legend by 90°
+              legend_height = unit(2.5, "cm"))  # Height of the CD legend
+  )
+)
+
+# Define the heatmap
+p <- Heatmap(
+  scaled_data,
+  name = " ",  
+  top_annotation = top_annotation,  
+  cluster_rows = TRUE,            
+  cluster_columns = FALSE,          
+  show_row_names = FALSE,          
+  show_column_names = FALSE,       
+  show_row_dend = FALSE,
+  #column_split = annotation$Group,
+  #row_split = DEGS_all$significance,
+  col = colorRamp2(c(-2, 0, 2), c("#2166AC", "#F7F7F7", "#B2182B")), 
+  heatmap_legend_param = list(
+    legend_direction = "vertical",  
+    legend_height = unit(3.5, "cm")   
+  )
+)
+p
+
+# Draw the heatmap
+#draw(p, annotation_legend_side = "right", heatmap_legend_side = "right")
+
+setwd("C:/Users/vali3/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA/Individual")
+#setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA/Individual")
+tiff("Heatmap_allCells_v2_HCI002.tiff", width = 6, height = 3, units = "in", res = 1200)
+#grid.newpage()
+#grid.draw(p$gtable, annotation_legend_side = "right", heatmap_legend_side = "right")
+draw(p, annotation_legend_side = "right", heatmap_legend_side = "right")
+dev.off()
+
+```
+
+```{r GSEA}
+
+### GSEA --------------------
+
+# Prepare gene sets 
+msigdb <- msigdbr(species = "Homo sapiens", category = "H")
+pathways_list <- split(x = msigdb$gene_symbol, f = msigdb$gs_name)
+
+# sort marker list
+markers <- tumors_DEGs_results
+markers <- markers[order(markers$avg_log2FC, decreasing = TRUE), ]
+
+ranks <- markers$avg_log2FC
+names(ranks) <- rownames(markers)
+
+# run GSEA
+fgsea_results <- fgsea(
+  pathways = pathways_list,
+  stats = ranks,
+  minSize = 15,  # Minimum size of gene sets
+  maxSize = 500, # Maximum size of gene sets
+  nperm = 1000   # Number of permutations
+)
+
+# View significant pathways
+fgsea_results <- fgsea_results[order(fgsea_results$pval), ]
+significant_pathways <- fgsea_results[fgsea_results$padj < 0.05, ]
+
+## Top pathways
+# Select top pathways (e.g., top 10 by adjusted p-value)
+top_positive_pathways <- significant_pathways %>%
+  filter(NES > 0) %>%
+  arrange(desc(NES)) %>%
+  head(10)
+top_negative_pathways <- significant_pathways %>%
+  filter(NES < 0) %>%
+  arrange(NES) %>%
+  head(10)
+
+# Combine both positive and negative pathways, keeping positive pathways first
+top_pathways <- bind_rows(top_positive_pathways, top_negative_pathways)
+
+# Set the factor levels for proper ordering
+top_pathways$pathway <- factor(top_pathways$pathway, levels = unique(top_pathways$pathway))
+
+# Bar Plot
+p <-  ggplot(top_pathways, aes(x = pathway, y = NES)) +
+  geom_bar(stat = "identity", width = 0.8, fill = ifelse(top_pathways$NES > 0, "#bb0c00", "#00AFBB")) +
+  coord_flip() +  # Flip coordinates for horizontal bars
+  labs(
+    #title = "Top Pathways Enrichment",
+    x = "",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    panel.grid = element_blank()  # Remove all grid lines
+  )
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+ggsave(filename = "GSEA_global.tiff", plot = p, width = 7.5, height = 4, dpi = 1200)
+
+```
+
+```{r GSEA_plot_tumors}
+
+# Load MSigDB hallmark gene sets
+msigdb <- msigdbr(species = "Homo sapiens", category = "H")
+pathways_list <- split(x = msigdb$gene_symbol, f = msigdb$gs_name)
+
+# Initialize an empty list to store results
+all_tumors_results <- list()
+
+# Loop over tumor IDs
+tumor_ids <- names(tumors_DEGs_results) # Assuming this contains tumor-specific DEG results
+for (tumor_id in tumor_ids) {
+  
+  # Sort markers by avg_log2FC for the current tumor
+  markers <- tumors_DEGs_results[[tumor_id]]
+  markers <- markers[order(markers$avg_log2FC, decreasing = TRUE), ]
+  
+  # Create ranks
+  ranks <- markers$avg_log2FC
+  names(ranks) <- rownames(markers)
+  
+  # Run GSEA
+  fgsea_results <- fgsea(
+    pathways = pathways_list,
+    stats = ranks,
+    minSize = 15,
+    maxSize = 500,
+    nperm = 2000
+  )
+  
+  # Filter significant pathways
+  significant_pathways <- fgsea_results %>%
+    filter(padj < 0.05) %>%
+    arrange(pval)
+  
+  # Add tumor ID column to results
+  significant_pathways$tumor_id <- tumor_id
+  
+  # Store results
+  all_tumors_results[[tumor_id]] <- significant_pathways
+}
+
+# Combine results into a single data frame
+all_results_df <- bind_rows(all_tumors_results)
+
+# Select top pathways for each tumor for visualization
+top_pathways_df <- all_results_df %>%
+  group_by(tumor_id) %>%
+  slice_max(order_by = abs(NES), n = 5) %>%  # Top 5 pathways by NES
+  ungroup()
+top_pathways_df <- all_results_df[all_results_df$pathway %in% top_pathways_df$pathway,]
+
+# Convert pathway and tumor_id to factors for consistent ordering
+top_pathways_df$pathway <- factor(top_pathways_df$pathway, levels = unique(top_pathways_df$pathway))
+top_pathways_df$tumor_id <- factor(top_pathways_df$tumor_id, levels = desired_order)
+
+# Plot using ggplot
+p <- ggplot(top_pathways_df, aes(x = tumor_id, y = pathway, size = padj, color = NES)) +
+  geom_point(alpha = 0.8) +
+  scale_size_continuous(
+    name = "P adj",
+    trans = "log10",
+    range = c(5, 1), 
+    breaks = c(0.001, 0.005, 0.01, 0.05), 
+    labels = c("0.001", "0.005", "0.01", "0.05"),
+   guide = guide_legend(override.aes = list(alpha = 1))
+  ) +
+  scale_color_gradient2(low = "#00AFBB", mid = "white", high = "#bb0c00", midpoint = 0) +
+  labs(
+    #title = "Pathway Enrichment Across Tumors",
+    x = NULL,
+    y = "",
+    color = "NES"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.position = "right"
+  )
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/GSEA")
+ggsave(filename = "GSEA_tumors.tiff", plot = p, width = 7.5, height = 4, dpi = 1200)
+
+
+
+```
+
+```{r GSEA_global}
+
+### GSEA --------------------
+
+# Prepare gene sets 
+msigdb <- msigdbr(species = "Homo sapiens", category = "H")
+pathways_list <- split(x = msigdb$gene_symbol, f = msigdb$gs_name)
+
+# sort marker list
+markers <- tumors_DEGs_results
+markers <- markers[order(markers$avg_log2FC, decreasing = TRUE), ]
+
+ranks <- markers$avg_log2FC
+names(ranks) <- rownames(markers)
+
+# run GSEA
+fgsea_results <- fgsea(
+  pathways = pathways_list,
+  stats = ranks,
+  minSize = 10,  # Minimum size of gene sets
+  maxSize = 1000, # Maximum size of gene sets
+  nperm = 1000   # Number of permutations
+)
+
+# View significant pathways
+fgsea_results <- fgsea_results[order(fgsea_results$pval), ]
+significant_pathways <- fgsea_results[fgsea_results$padj < 0.05, ]
+
+## Top pathways
+# Select top pathways (e.g., top 10 by adjusted p-value)
+top_positive_pathways <- significant_pathways %>%
+  filter(NES > 0) %>%
+  arrange(desc(NES)) %>%
+  head(10)
+top_negative_pathways <- significant_pathways %>%
+  filter(NES < 0) %>%
+  arrange(NES) %>%
+  head(10)
+
+# Combine both positive and negative pathways, keeping positive pathways first
+top_pathways <- bind_rows(top_positive_pathways, top_negative_pathways)
+
+# Set the factor levels for proper ordering
+top_pathways$pathway <- factor(top_pathways$pathway, levels = unique(top_pathways$pathway))
+
+# Bar Plot
+ggplot(top_pathways, aes(x = pathway, y = NES)) +
+  geom_bar(stat = "identity", width = 0.8, fill = ifelse(top_pathways$NES > 0, "#bb0c00", "#00AFBB")) +
+  coord_flip() +  # Flip coordinates for horizontal bars
+  labs(
+    title = "Top Pathways Enrichment",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10)
+  )
+
+```
+
