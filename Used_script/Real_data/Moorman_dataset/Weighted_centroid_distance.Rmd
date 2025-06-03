@@ -1,0 +1,346 @@
+### Figure 12B
+
+---
+title: "Centroid_dist_Moorman"
+output: html_document
+date: "2024-11-26"
+---
+
+```{r setup, include=FALSE}
+knitr::knit_global()
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r load_libraries, include=FALSE}
+# Load required package
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggpmisc)
+library(caret)
+library(ggpubr)
+library(writexl)
+# set seed
+set.seed(43)
+
+# color palette
+
+# load libraries
+# set working directory
+setwd("D:/Dropbox/Master Thesis/Datasets/Moorman")
+
+# load data
+Seu_Moorman_Tumor <- readRDS("D:/Dropbox/Master Thesis/Datasets/Moorman/Seu_Moorman_Tumor.rds")
+Seu_Moorman_Epi <- readRDS("D:/Dropbox/Master Thesis/Datasets/Moorman/Seu_Moorman_Epi.rds")
+
+```
+
+### Tumor
+
+```{r QC}
+# QC
+Seu_Moorman_Tumor <- subset(Seu_Moorman_Tumor, subset = Low.Quality == "False")
+Seu_Moorman_Tumor <- subset(Seu_Moorman_Tumor, subset = nFeature_RNA > 250)
+
+# keep only patients with > 50 cells in PT/Met
+patient_counts <- table(Seu_Moorman_Tumor@meta.data[["Tumor.Status"]], Seu_Moorman_Tumor@meta.data[["Patient"]])
+patients_to_keep <- names(which(patient_counts["Primary Tumor", ] > 50 & patient_counts["Metastasis", ] > 50))
+
+# Filter the Seurat object
+Seu_Moorman_Tumor <- subset(Seu_Moorman_Tumor, subset = Patient %in% patients_to_keep)
+
+
+```
+
+```{r functions}
+### Functions ###
+## function: RunSeuratPipeline
+RunSeuratPipeline <- function(seu_object){
+  seu_object <- NormalizeData(seu_object, normalization.method = "LogNormalize", scale.factor = 10000)
+  seu_object <- FindVariableFeatures(seu_object, selection.method = "vst", nfeatures = 2000)
+  all.genes <- rownames(seu_object)
+  seu_object <- ScaleData(seu_object, features = all.genes) # important! otherwise CD values will be super high
+  seu_object <- RunPCA(seu_object, npcs = 30)
+  return(seu_object)
+}
+## function: extract PCs and SDs
+# extract PCs
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  cumu <- cumsum(pct)
+  co1 <- which(cumu > 45)[1]
+  co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  #pcs <- min(co1, co2)
+  pcs <- co2
+  PCs <- as.data.frame(seu_object@reductions$pca@cell.embeddings[,c(1:pcs)])
+  return(PCs)
+}
+# extract SDs
+GetSDs <- function(seu_object, numPC){
+  pca <- seu_object@reductions$pca
+  total_variance <- seu_object@reductions$pca@misc$total.variance
+  eigValues <- (pca@stdev)^2
+  varExplained <- eigValues / total_variance
+  SDs <- (varExplained * 100)[1:numPC]
+  return(SDs)
+}
+## function: calculate centroid distance
+CalculateCentroidDistance <- function(PCs, withSD = NULL, SDs = NULL){
+  centroid_list <- as.vector(apply(PCs, 2, mean)) # calculate centroid for all PCs
+  centroid_matrix <- sweep(PCs, 2, centroid_list) # create matrix with centroid in the center (by substraction of centroid list)
+  # Calculate distance
+  if (!is.null(withSD)) {
+    distance <- sqrt(rowSums((sweep(centroid_matrix, 2, SDs, "*"))^2)) # with SD correction (if)
+  } else {
+    distance <- sqrt(rowSums(centroid_matrix^2)) # normal
+  }
+  distance <- as.matrix(distance)
+  return(distance)
+}
+```
+
+
+```{r Run_CD}
+### PT ---------------
+Seu_Moorman_Tumor_PT <- subset(Seu_Moorman_Tumor, subset = Tumor.Status == "Primary Tumor")
+
+# get IDs
+patient_id <- as.character(unique(Seu_Moorman_Tumor_PT@meta.data$Patient))
+# Split by patient_id
+Seu_Moorman_Tumor_PT_split <- SplitObject(Seu_Moorman_Tumor_PT, split.by = "Patient")
+
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+PCs <- vector("list", length = length(patient_id)) # PCs
+PC_SD <- vector("list", length = length(patient_id)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(Seu_Moorman_Tumor_PT_split)) {
+  # split patients
+  patient <- Seu_Moorman_Tumor_PT_split[[i]]
+    # seurat pipeline
+    patient <- RunSeuratPipeline(patient)
+    # get PCs and SDs
+    PCs[[i]] <- GetPCs(patient)
+    PC_SD[[i]] <- GetSDs(patient, length(PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(PCs))
+#
+for (i in 1:length(PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(PCs[[i]], withSD = TRUE, PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+centroid_sum_Moorman_PT <- data.frame(mean = mean, 
+                                       sd = sd, 
+                                       patient_id = patient_id,
+                                       PCs = sapply(PCs, ncol),
+                                       weighted = c(rep("yes", times = length(centroid_distances))),
+                                       Tissue = c(rep("PT", times = length(centroid_distances))))
+
+#setwd("D:/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/Moorman")
+#save(centroid_sum_Moorman_PT, file = "centroid_sum_Moorman_PT.RData")
+
+### Met ---------------
+Seu_Moorman_Tumor_M <- subset(Seu_Moorman_Tumor, subset = Tumor.Status == "Metastasis")
+
+# get IDs
+patient_id <- as.character(unique(Seu_Moorman_Tumor_M@meta.data$Patient))
+# Split by patient_id
+Seu_Moorman_Tumor_M_split <- SplitObject(Seu_Moorman_Tumor_M, split.by = "Patient")
+
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+PCs <- vector("list", length = length(patient_id)) # PCs
+PC_SD <- vector("list", length = length(patient_id)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(Seu_Moorman_Tumor_M_split)) {
+  # split patients
+  patient <- Seu_Moorman_Tumor_M_split[[i]]
+    # seurat pipeline
+    patient <- RunSeuratPipeline(patient)
+    # get PCs and SDs
+    PCs[[i]] <- GetPCs(patient)
+    PC_SD[[i]] <- GetSDs(patient, length(PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(PCs))
+#
+for (i in 1:length(PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(PCs[[i]], withSD = TRUE, PC_SD[[i]])
+}
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+centroid_sum_Moorman_Met <- data.frame(mean = mean, 
+                                       sd = sd, 
+                                       patient_id = patient_id,
+                                       PCs = sapply(PCs, ncol),
+                                       weighted = c(rep("yes", times = length(centroid_distances))),
+                                       Tissue = c(rep("Met", times = length(centroid_distances))))
+
+#setwd("D:/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/Moorman")
+#save(centroid_sum_Moorman_Met, file = "centroid_sum_Moorman_Met.RData")
+
+```
+
+```{r Plot, fig.width= 4, fig.height= 3}
+
+centroid_sum_all <- rbind(centroid_sum_Moorman_PT, centroid_sum_Moorman_Met)
+
+## plot
+ggbarplot(centroid_sum_all, x = "Tissue", y = "mean", 
+          add = c("mean_sd", "jitter"),
+          color = "black", fill = "Tissue", palette = c("orange", "indianred2"),
+          position = position_dodge(0.8),
+          ylab = "Mean Distance to Centroid",
+          title = "Moorman et al.")
+
+
+### better plot
+centroid_sum_all$Tissue <- factor(centroid_sum_all$Tissue, levels = c("PT", "Met"))
+
+ggplot(centroid_sum_all, aes(x = Tissue, y = mean)) + 
+  geom_bar(stat = "summary", fun = "mean", aes(fill = Tissue), width = 0.5, color = "black") +  # Single bar for Tumor and Met
+  geom_errorbar(stat = "summary", fun.data = mean_se, width = 0.2) +  # Error bars for the means
+  geom_point(aes(Tissue = patient_id), position = position_jitter(width = 0.01), size = 1, alpha = 0.5) +  # Individual points
+  geom_line(aes(Tissue = patient_id), size = 0.5, alpha = 0.8) +  
+  scale_fill_manual(values = c("PT" = "orange", "Met" = "indianred2")) +  # Custom bar colors for Tumor and Met
+  theme_classic() +
+theme(axis.text.x = element_text(size = 12),  # Increase x-axis text size
+        axis.text.y = element_text(size = 12),  # Increase y-axis text size
+        legend.position = "right") +  # Legend for met_pot
+  labs(x = "Tissue", y = "Weighted Mean CD", title = "PT vs Met Comparison")
+
+
+
+
+### T test
+ttest <- t.test(mean ~ Tissue, data = centroid_sum_all, var.equal = TRUE)
+pvalues <- ttest$p.value
+pvalues
+
+### Plots with significance labels 
+sig_df <- data.frame(
+      group1 = "PT",
+      group2 = "Met",
+      y.position = 140,  # change these values as needed
+      p.adj = pvalues
+)
+    
+    # convert p-values to star labels
+    sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                      ifelse(sig_df$p.adj < 0.01, "**",
+                      ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+    
+
+p <- ggplot(centroid_sum_all, aes(x = Tissue, y = mean)) +
+  geom_bar(stat = "summary", fun = "mean", aes(fill = Tissue), width = 0.5, color = "black") +
+  geom_errorbar(stat = "summary", fun.data = mean_sd, width = 0.2) +
+  geom_point(aes(group = patient_id), position = position_jitter(width = 0.01), size = 1, alpha = 1) +
+  geom_line(aes(group = patient_id), color = "#2b2d42", linetype = "dashed", size = 0.5, alpha = 0.8) + 
+  scale_fill_manual(values = c("PT" = "goldenrod2", "Met" = "indianred2")) +
+  theme_classic() +
+  ylim(0, 150) +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01, size = 3) +
+  theme(axis.text.x = element_text(size = 12, color = "black"),
+        axis.text.y = element_text(size = 12, color = "black"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        legend.position = "right") +
+  labs(x = "Tissue", y = "Weighted Mean CD")
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Moorman")
+ggsave(filename = "Moorman_CD_PTvsMet.tiff", width = 3.5, height = 2.5, dpi = 1200)
+    
+```
+
+```{r Plot cells>100, fig.width= 4, fig.height= 3}
+
+centroid_sum_all <- rbind(centroid_sum_Moorman_PT, centroid_sum_Moorman_Met)
+patients_to_keep <- names(which(patient_counts["Primary Tumor", ] > 100 & patient_counts["Metastasis", ] > 100))
+
+centroid_sum_all <- centroid_sum_all[centroid_sum_all$patient_id %in% patients_to_keep,]
+centroid_sum_all$patient_id <- as.factor(centroid_sum_all$patient_id)
+centroid_sum_all$Tissue <- factor(centroid_sum_all$Tissue, levels = c("PT", "Met"))
+
+
+### Statistical test
+# check normality
+shapiro.test(centroid_sum_all$mean[centroid_sum_all$Tissue == "PT"])
+shapiro.test(centroid_sum_all$mean[centroid_sum_all$Tissue == "Met"]) #-> not normal
+
+# Paired MWU-test
+paired_data <- centroid_sum_all[centroid_sum_all$patient_id %in% 
+                                      centroid_sum_all$patient_id[duplicated(centroid_sum_all$patient_id)], ]
+
+pt_values <- paired_data$mean[paired_data$Tissue == "PT"]
+met_values <- paired_data$mean[paired_data$Tissue == "Met"]
+
+# Perform paired MWU
+wilcox_test <- wilcox.test(pt_values, met_values, paired = TRUE)
+pvalues <- wilcox_test$p.value
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+      group1 = "PT",
+      group2 = "Met",
+      y.position = 140,  # change these values as needed
+      p.adj = pvalues
+)
+    
+    # convert p-values to star labels
+    sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                      ifelse(sig_df$p.adj < 0.01, "**",
+                      ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+    
+
+p <- ggplot(centroid_sum_all, aes(x = Tissue, y = mean)) +
+  geom_bar(stat = "summary", fun = "mean", aes(fill = Tissue), width = 0.5, color = "black") +
+  geom_errorbar(stat = "summary", fun.data = mean_sd, width = 0.2) +
+  geom_point(aes(group = patient_id), position = position_jitter(width = 0.01), size = 1, alpha = 1) +
+  geom_line(aes(group = patient_id), color = "#2b2d42", linetype = "dashed", size = 0.5, alpha = 0.8) + 
+  scale_fill_manual(values = c("PT" = "goldenrod2", "Met" = "indianred2")) +
+  theme_classic() +
+  ylim(0, 150) +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01) +
+  theme(axis.text.x = element_text(size = 12, color = "black"),
+        axis.text.y = element_text(size = 12, color = "black"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        legend.position = "right") +
+  labs(x = "Tissue", y = "Weighted Mean CD")
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Real/Moorman")
+ggsave(filename = "Moorman_CD_PTvsMet_100cells.tiff", width = 3.5, height = 2.5, dpi = 1200)
+    
+```
