@@ -1,0 +1,279 @@
+### Figure 9E + 10C
+
+---
+title: "BubbleTreeShannon_Winkler"
+output: html_document
+date: "2025-01-10"
+---
+
+```{r setup, include=FALSE}
+knitr::knit_global()
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r load_libraries, include=FALSE}
+# Load required package
+#BiocManager::install("scBubbletree")
+library(scBubbletree)
+library(ggplot2)
+library(ggtree)
+library(patchwork)
+#BiocManager::install("glmGamPoi")
+# install sctransform from Github
+#install.packages("sctransform")
+library(Seurat)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(sctransform)
+library(ggpubr)
+
+# load data
+load("D:/Dropbox/Master Thesis/PDX_data/seu_10xv2_PT.RData")
+# fix seurat object
+seu_10xv2_PT@assays$RNA@counts <- as(seu_10xv2_PT@assays$RNA@counts, "dgCMatrix")
+
+load("D:/Dropbox/Master Thesis/PDX_data/seu_ss2.RData")
+
+setwd("D:/Dropbox/Master Thesis/Methods_transcript/Biodiversity/BubbleTree/Winkler")
+```
+
+
+```{r QC}
+# 10x
+seu_10xv2_PT <- subset(seu_10xv2_PT, subset = n_genes > 250)
+
+```
+
+
+```{r functions}
+select_dims <- function(object) {
+  pct <- object[["pca"]]@stdev / sum(object[["pca"]]@stdev) * 100
+  PCopt <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  return(1:PCopt)
+}
+
+scBubblePlotPipeline <- function(d){
+  # Select the 5,000 most variable genes
+  d <- FindVariableFeatures(object = d, selection.method = "vst", nfeatures = 5000)
+  # Normalize the data using SCTransform
+  d <- SCTransform(d, variable.features.n = 5000)
+  # Run PCA
+  d <- RunPCA(object = d, npcs = 50, features = VariableFeatures(object = d))
+  # select optimal dims
+  selected_dims <- select_dims(d)
+  
+  ### scBubbleTree
+    # Extract the PCA embeddings
+    A <- d@reductions$pca@cell.embeddings[, 1:length(selected_dims)]
+    m <- d@meta.data
+    d_ccl <- list(A = A, m = m)
+    
+    #k-means
+    b_k <- get_k(B_gap = 10,
+             ks = 1:30, # no. of ks
+             x = A, # input matrix
+             n_start = 50, 
+             iter_max = 100,
+             kmeans_algorithm = "MacQueen", 
+             cores = 2)
+    
+    ## find optimal k
+    gap_stats <- b_k$gap_stats_summary
+    gap_diff <- diff(gap_stats$gap_mean) / gap_stats$gap_mean[-length(gap_stats$gap_mean)]
+    optimal_k <- which(gap_diff < 0.01)[1] # First k where % change < 1%
+    
+    k <- get_bubbletree_kmeans(x = A,
+                           k = optimal_k,
+                           cores = 1,
+                           B = 300,
+                           N_eff = 200,
+                           round_digits = 1,
+                           show_simple_count = FALSE,
+                           kmeans_algorithm = "MacQueen")
+    return(k)
+}
+
+
+```
+
+```{r run 10x}
+# get IDs
+tumor_ID <- as.character(unique(seu_10xv2_PT@meta.data$Tumor_ID_updated))
+# Split so by tumor
+seu_10xv2_PT_split <- SplitObject(seu_10xv2_PT, split.by = "Tumor_ID_updated")
+
+### Biodiversity - Shannon Entropy
+# 1. Run scBubbleTree pipeline (k-means, with threshold of 1%)
+  # create list to store trees after scBubbleTree pipeline
+  trees_list <- vector("list", length = length(tumor_ID))
+  
+  # Run scBubbleTree for each tumor
+  for (i in 1:length(seu_10xv2_PT_split)) {
+    # split patients
+    tumor <- seu_10xv2_PT_split[[i]]
+    # run scBubbleTree pipeline
+    trees_list[[i]] <- tryCatch(
+    scBubblePlotPipeline(tumor),
+    error = function(e) if (grepl("k must be a positive integer", e$message)) 0 else stop(e)
+  )
+}
+  # save
+  #Winkler10x_Trees_List <- trees_list
+  #names(Winkler10x_Trees_List) <- tumor_ID
+  #save(Winkler10x_Trees_List, file = "Winkler10x_Trees_List.RData")
+  
+  trees_list <-   Winkler10x_Trees_List
+  tumor_ID <- names(Winkler10x_Trees_List)
+  
+# 2. Calculate Shannon-Entropy from proportions
+  # create vector to store Shannon Entropy
+  Shannon_list <- c()
+    
+  # Calc. SE
+  for (i in 1:length(trees_list)) {
+    # split trees
+    tree <- trees_list[[i]]
+    
+    # Check if "tree_meta" exists in the tree
+    if ("tree_meta" %in% names(tree)) {
+      results_df <- tree[["tree_meta"]]
+      
+      # Calculate Shannon entropy
+      probs <- results_df$p
+      Shannon_list[i] <- -sum(probs * log2(probs))
+    } else {
+      # Assign 0 if "tree_meta" is not present
+      Shannon_list[i] <- 0
+    }
+  }
+  Winkler10x_Shannon_list <- Shannon_list
+  names(Winkler10x_Shannon_list) <- tumor_ID
+  
+  
+  
+# Visualization
+Winkler_10x_SE_results <- data.frame(SE = Winkler10x_Shannon_list, 
+                                       tumor_id = tumor_ID,
+                                       group = c(rep("10x", times = length(Winkler10x_Shannon_list))),
+                                     Tissue = c(rep("PT", times = length(Winkler10x_Shannon_list))))
+
+meta_data_table <- as.data.frame(table(seu_10xv2_PT@meta.data$metastatic_potential_group, seu_10xv2_PT@meta.data$Tumor_ID_updated))
+colnames(meta_data_table) <- c("met_pot", "tumor_id", "count")
+meta_data_table <- meta_data_table[meta_data_table$count > 0, ]
+Winkler_10x_SE_results <- merge(Winkler_10x_SE_results, meta_data_table[, c("met_pot", "tumor_id")], by = "tumor_id", all.x = TRUE)
+
+# change anno
+    Winkler_10x_SE_results$met_pot <- gsub("low", "Low", Winkler_10x_SE_results$met_pot)
+    Winkler_10x_SE_results$met_pot <- gsub("intermediate", "Moderate", Winkler_10x_SE_results$met_pot)
+    Winkler_10x_SE_results$met_pot <- gsub("high", "High", Winkler_10x_SE_results$met_pot)
+Winkler_10x_SE_results <- Winkler_10x_SE_results %>% mutate(met_pot = factor(met_pot, levels = c("Low", "Moderate", "High")))
+
+ggplot(Winkler_10x_SE_results, aes(x = met_pot, y = SE, fill = met_pot)) +
+  geom_boxplot(outlier.shape = NA) +  # Boxplot without outliers
+  geom_jitter(width = 0.2, size = 2, color = "black") +  # Jittered points with black color
+  scale_fill_manual(values = c("#bfc4c6", "#6d7486", "#2b2d42")) +  # Custom palette
+  labs(
+    x = "Metastatic Potential",
+    y = "Shannon Entropy",
+    fill = "Metastatic Potential"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+
+
+### One-way Anova with Tukey's test for multiple comparisons
+Winkler_10x_SE_results$met_pot <- factor(Winkler_10x_SE_results$met_pot)
+# Perform ANOVA
+anova_result <- aov(SE ~ met_pot, data = Winkler_10x_SE_results)
+summary(anova_result)
+# Perform Tukey's HSD test
+tukey_test <- TukeyHSD(anova_result)
+summary(tukey_test)
+pvalues <- as.data.frame(tukey_test$met_pot)[,4] #padj
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("Low", "Low", "Moderate"),
+  group2 = c("Moderate", "High", "High"),
+  y.position = c(3, 3.3, 3.6),  # change these values as needed
+  p.adj = pvalues
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+
+Winkler_10x_SE_results <- Winkler_10x_SE_results %>% mutate(met_pot = factor(met_pot, levels = c("Low", "Moderate", "High")))
+
+p <- ggboxplot(Winkler_10x_SE_results, x = "met_pot", y = "SE",
+          fill = "met_pot", 
+          palette = c("#bfc4c6", "#6d7486", "#2b2d42"), 
+          xlab = "Metastatic Potential",
+          ylab = "Shannon Entropy",
+          add = "jitter") +
+  #stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01, size = 3) +
+  theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0, 3.5))
+
+p
+
+
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/MultiSeq")
+ggsave(filename = "Winkler_SE_10x.tiff", plot = p, width = 3, height = 2.5, dpi = 1200)
+
+
+
+
+### Statistical test
+Winkler_10x_SE_results$mets <- ifelse(Winkler_10x_SE_results$met_pot == "Low", "No", "Yes")
+# check normality
+shapiro.test(Winkler_10x_SE_results$SE[Winkler_10x_SE_results$mets == "No"])
+shapiro.test(Winkler_10x_SE_results$SE[Winkler_10x_SE_results$mets == "Yes"]) # not normal distributed --> Mann Whitney U
+
+### Mann Whitney U
+# also not significant: Mets vs. No Mets (Mod+High vs. Low. 0.265)
+mw_test <- wilcox.test(SE ~ mets, data = Winkler_10x_SE_results, exact = FALSE)
+pvalue <- mw_test$p.value
+
+
+Winkler_10x_SE_results <- Winkler_10x_SE_results %>% mutate(mets = factor(mets, levels = c("No", "Yes")))
+
+## plot histogram
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("No"),
+  group2 = c("Yes"),
+  y.position = c(3),  # change these values as needed
+  p.adj = pvalue
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", round(pvalue, 3))))
+
+p <- ggboxplot(Winkler_10x_SE_results, x = "mets", y = "SE",
+          fill = "mets", 
+          palette = c("#bfc4c6", "#4e5364"),
+          xlab = "Metastasis",
+          ylab = "Shannon Entropy",
+          add = "jitter") +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01, size = 3) +
+  theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0, 3.5))
+
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler/MultiSeq")
+ggsave(filename = "Winkler10x_SE_hist_yesno_sig.tiff", plot = p, width = 2.2, height = 2.5, dpi = 1200)
+
+```
