@@ -47,12 +47,6 @@ load("D:/Dropbox/Master Thesis/PDX_data/seu_ss2.RData")
 seu_10xv2_PT <- subset(seu_10xv2_PT, subset = n_genes > 250)
 table(seu_10xv2_PT@meta.data[["Tumor_ID_updated"]])
 
-
-### ss2
-# filter
-seu_ss2 <- subset(seu_ss2, subset = n_genes > 250)
-table(seu_ss2@meta.data[["Tumor_ID"]], seu_ss2@meta.data[["sort"]])
-
 ```
 
 
