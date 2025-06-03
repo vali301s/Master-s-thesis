@@ -1,0 +1,334 @@
+### Figure 9D + 10B
+
+---
+title: "Centroid_dist_Winkler_optPCs"
+output: html_document
+date: "2024-10-21"
+---
+
+```{r setup, include=FALSE}
+knitr::knit_global()
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r load_libraries, include=FALSE}
+# Load required package
+if (!requireNamespace("MASS", quietly = TRUE)) {
+  install.packages("MASS")
+}
+library(Seurat)
+library(ggplot2)
+library(ggpmisc)
+library(caret)
+library(ggpubr)
+library(dplyr)
+library(RColorBrewer)
+# set seed
+set.seed(43)
+
+# color palette
+
+# load libraries
+# set working directory
+setwd("D:/Dropbox/Master Thesis/PDX_data")
+
+# load data
+load("D:/Dropbox/Master Thesis/PDX_data/seu_10xv2_PT.RData")
+# fix seurat object
+seu_10xv2_PT@assays$RNA@counts <- as(seu_10xv2_PT@assays$RNA@counts, "dgCMatrix")
+
+load("D:/Dropbox/Master Thesis/PDX_data/seu_ss2.RData")
+```
+
+```{r QC}
+
+### 10x
+# filter
+seu_10xv2_PT <- subset(seu_10xv2_PT, subset = n_genes > 250)
+table(seu_10xv2_PT@meta.data[["Tumor_ID_updated"]])
+
+
+### ss2
+# filter
+seu_ss2 <- subset(seu_ss2, subset = n_genes > 250)
+table(seu_ss2@meta.data[["Tumor_ID"]], seu_ss2@meta.data[["sort"]])
+
+```
+
+
+```{r functions}
+### Functions ###
+## function: RunSeuratPipeline
+RunSeuratPipeline <- function(seu_object){
+  seu_object <- NormalizeData(seu_object, normalization.method = "LogNormalize", scale.factor = 10000)
+  seu_object <- FindVariableFeatures(seu_object, selection.method = "vst", nfeatures = 2000)
+  seu_object <- ScaleData(seu_object)
+  seu_object <- RunPCA(seu_object, npcs = 30)
+  return(seu_object)
+}
+## function: extract PCs and SDs
+# extract PCs
+GetPCs <- function(seu_object){
+  # get optimal PC
+  pct <- seu_object[["pca"]]@stdev / sum(seu_object[["pca"]]@stdev) * 100
+  PCopt <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  pcs <- PCopt
+  PCs <- as.data.frame(seu_object@reductions$pca@cell.embeddings[,c(1:pcs)])
+  return(PCs)
+}
+# extract SDs
+GetSDs <- function(seu_object, numPC){
+  pca <- seu_object@reductions$pca
+  total_variance <- seu_object@reductions$pca@misc$total.variance
+  eigValues <- (pca@stdev)^2
+  varExplained <- eigValues / total_variance
+  SDs <- (varExplained * 100)[1:numPC]
+  return(SDs)
+}
+## function: calculate centroid distance
+CalculateCentroidDistance <- function(PCs, withSD = NULL, SDs = NULL){
+  centroid_list <- as.vector(apply(PCs, 2, mean)) # calculate centroid for all PCs
+  centroid_matrix <- sweep(PCs, 2, centroid_list) # create matrix with centroid in the center (by substraction of centroid list)
+  # Calculate distance
+  if (!is.null(withSD)) {
+    distance <- sqrt(rowSums((sweep(centroid_matrix, 2, SDs, "*"))^2)) # with SD correction (if)
+  } else {
+    distance <- sqrt(rowSums(centroid_matrix^2)) # normal
+  }
+  distance <- as.matrix(distance)
+  return(distance)
+}
+```
+
+Centroid distances of Normals with/without variance weighting
+
+```{r 10x, fig.height=4, fig.width=8}
+
+#### Cluster Analysis ####
+# get IDs
+tumor_ID <- as.character(unique(seu_10xv2_PT@meta.data$Tumor_ID_updated))
+# Split by tumor_id
+seu_10xv2_PT_split <- SplitObject(seu_10xv2_PT, split.by = "Tumor_ID_updated")
+
+# Optimal PCs with weighted variance
+#### Cluster Analysis ####
+
+### Distance analysis
+## get PCA coordinates
+# initialize list to store df and SD for PCs
+Winkler_PCs <- vector("list", length = length(tumor_ID)) # PCs
+Winkler_PC_SD <- vector("list", length = length(tumor_ID)) # SD of PCs
+
+# extract PCs and SDs per patient in for loop
+for (i in 1:length(seu_10xv2_PT_split)) {
+  # split patients
+  tumor <- seu_10xv2_PT_split[[i]]
+    # seurat pipeline
+    tumor <- RunSeuratPipeline(tumor)
+    # get PCs and SDs
+    Winkler_PCs[[i]] <- GetPCs(tumor)
+    Winkler_PC_SD[[i]] <- GetSDs(tumor, length(Winkler_PCs))
+}
+## calculate distance to centroid with SD correction
+# calculate centroid
+# initiate list
+centroid_distances <- vector("list", length = length(Winkler_PCs))
+#
+for (i in 1:length(Winkler_PCs)) {
+  centroid_distances[[i]] <- CalculateCentroidDistance(Winkler_PCs[[i]], withSD = TRUE, Winkler_PC_SD[[i]])
+}
+
+#save(centroid_distances, file = "D:/Dropbox/Master Thesis/Methods_transcript/GSEA/centroid_distances.RData")
+#save(centroid_distances, file = "D:/Dropbox/Master Thesis/Methods_transcript/Centroid_distance/Winkler/centroid_distances10x.RData")
+
+# summary
+mean <- c()
+sd <- c()
+
+for (i in 1:length(centroid_distances)) {
+  mean[i] <- mean(centroid_distances[[i]])
+  sd[i] <- sd(centroid_distances[[i]])
+}
+#
+centroid_sum_Winkler_10x <- data.frame(mean = mean, 
+                                       sd = sd, 
+                                       tumor_id = tumor_ID,
+                                       #PCs = sapply(Winkler_PCs, ncol),
+                                       weighted = c(rep("yes", times = length(centroid_distances))),
+                                       group = c(rep("10x", times = length(centroid_distances))),
+                                       Tissue = c(rep("PT", times = length(centroid_distances))))
+# add metastatic potential
+meta_data_table <- as.data.frame(table(seu_10xv2_PT@meta.data$metastatic_potential_group, seu_10xv2_PT@meta.data$Tumor_ID_updated))
+colnames(meta_data_table) <- c("met_pot", "tumor_id", "count")
+meta_data_table <- meta_data_table[meta_data_table$count > 0, ]
+centroid_sum_Winkler_10x <- merge(centroid_sum_Winkler_10x, meta_data_table[, c("met_pot", "tumor_id")], by = "tumor_id", all.x = TRUE)
+    # change anno
+    centroid_sum_Winkler_10x$met_pot <- gsub("low", "Low", centroid_sum_Winkler_10x$met_pot)
+    centroid_sum_Winkler_10x$met_pot <- gsub("intermediate", "Moderate", centroid_sum_Winkler_10x$met_pot)
+    centroid_sum_Winkler_10x$met_pot <- gsub("high", "High", centroid_sum_Winkler_10x$met_pot)
+
+centroid_sum_Winkler_10x <- centroid_sum_Winkler_10x %>% mutate(met_pot = factor(met_pot, levels = c("Low", "Moderate", "High")))
+
+## plot histogram
+p <- ggbarplot(centroid_sum_Winkler_10x, x = "met_pot", y = "mean", 
+          add = c("mean_sd", "jitter"),
+          color = "black", fill = "met_pot", palette = c("#bfc4c6", "#6d7486", "#2b2d42"), 
+          # old colors: c("#edf2f4", "#8d99ae", "#2b2d42")
+          position = position_dodge(0.3),
+          ylim = c(0,40),
+          ylab = "Weighted Mean CD",
+          xlab = "Metastatic Potential") +
+          theme(legend.position = "none")
+p
+
+#setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler")
+setwd("C:/Users/vali3/Dropbox/Master Thesis/Thesis/Figures/Winkler")
+ggsave(filename = "Winkler10x_CD_hist.tiff", plot = p, width = 3, height = 2.5, dpi = 1200)
+
+
+### Anova
+### One-way Anova with Tukey's test for multiple comparisons
+centroid_sum_Winkler_10x$met_pot <- factor(centroid_sum_Winkler_10x$met_pot)
+# Perform ANOVA
+anova_result <- aov(mean ~ met_pot, data = centroid_sum_Winkler_10x)
+summary(anova_result)
+# Perform Tukey's HSD test
+tukey_test <- TukeyHSD(anova_result)
+summary(tukey_test)
+pvalues <- as.data.frame(tukey_test$met_pot)[,4] #padj
+
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("Low", "Low", "Moderate"),
+  group2 = c("Moderate", "High", "High"),
+  y.position = c(35, 38, 41),  # change these values as needed
+  p.adj = pvalues
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", "ns")))
+
+p <- ggbarplot(centroid_sum_Winkler_10x, x = "met_pot", y = "mean", 
+          add = c("mean_sd", "jitter"),
+          fill = "met_pot", 
+          palette = c("#bfc4c6", "#6d7486", "#2b2d42"), 
+          xlab = "Metastatic Potential",
+          ylab = "Weighted Mean CD",
+          ylim = c(0,45),
+          position = position_dodge(0.8)) +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01, size = 3) +
+  theme(legend.position = "none")
+p
+
+
+#setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler")
+#ggsave(filename = "Winkler10x_CD_hist_sig.tiff", plot = p, width = 3, height = 2.5, dpi = 1200)
+
+centroid_sum_Winkler_10x$mets <- ifelse(centroid_sum_Winkler_10x$met_pot == "Low", "No", "Yes")
+# Check normality
+shapiro.test(centroid_sum_Winkler_10x$mean[centroid_sum_Winkler_10x$mets == "No"])
+shapiro.test(centroid_sum_Winkler_10x$mean[centroid_sum_Winkler_10x$mets == "Yes"])
+
+
+# also not significant if we do t-test: Mets vs. No Mets (Mod+High vs. Low, p = 0.226)
+
+ttest <- t.test(mean ~ mets, data = centroid_sum_Winkler_10x, var.equal = TRUE)
+pvalue <- ttest$p.value
+
+
+centroid_sum_Winkler_10x <- centroid_sum_Winkler_10x %>% mutate(mets = factor(mets, levels = c("No", "Yes")))
+
+## plot histogram
+
+### Plots with significance labels 
+sig_df <- data.frame(
+  group1 = c("No"),
+  group2 = c("Yes"),
+  y.position = c(35),  # change these values as needed
+  p.adj = pvalue
+)
+
+# convert p-values to star labels
+sig_df$label <- ifelse(sig_df$p.adj < 0.001, "***", 
+                  ifelse(sig_df$p.adj < 0.01, "**",
+                  ifelse(sig_df$p.adj < 0.05, "*", round(pvalue, 3))))
+
+p <- ggbarplot(centroid_sum_Winkler_10x, x = "mets", y = "mean", 
+          add = c("mean_sd", "jitter"),
+          fill = "mets", 
+          palette = c("#bfc4c6", "#4e5364"), 
+          xlab = "Metastasis",
+          ylab = "Weighted Mean CD",
+          ylim = c(0,40),
+          position = position_dodge(0.8)) +
+  stat_pvalue_manual(sig_df, label = "label", tip.length = 0.01, size = 3) +
+  theme(legend.position = "none")
+p
+
+#setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler")
+#setwd("C:/Users/vali3/Dropbox/Master Thesis/Thesis/Figures/Winkler")
+#ggsave(filename = "Winkler10x_CD_hist_yesno_sig.tiff", plot = p, width = 2.2, height = 2.5, dpi = 1200)
+
+
+
+
+#### plot violin plots -------------------------------
+# long format
+names(centroid_distances) <- tumor_ID
+centroid_distances_long <- do.call(rbind, lapply(names(centroid_distances), function(id) {
+  data.frame(
+    tumor_id = id,
+    distance = centroid_distances[[id]],
+    stringsAsFactors = FALSE
+  )
+})) %>%
+  left_join(meta_data_table, by = "tumor_id")
+
+# change anno
+centroid_distances_long$met_pot <- gsub("low", "Low", centroid_distances_long$met_pot)
+centroid_distances_long$met_pot <- gsub("intermediate", "Moderate", centroid_distances_long$met_pot)
+centroid_distances_long$met_pot <- gsub("high", "High", centroid_distances_long$met_pot)
+
+centroid_distances_long <- centroid_distances_long %>% mutate(met_pot = factor(met_pot, levels = c("Low", "Moderate", "High")))
+
+centroid_distances_long$tumor_id <- factor(
+  centroid_distances_long$tumor_id,
+  levels = meta_data_table %>% arrange(desc(met_pot)) %>% pull(tumor_id)
+)
+
+#
+p <- ggplot(centroid_distances_long, aes(x = tumor_id, y = distance, fill = tumor_id)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.7, color = "black") + # Add black border to violins
+  geom_jitter(width = 0.2, size = 0.001) +
+  facet_wrap(~ met_pot, scales = "free_x", nrow = 1) + # Adjusted to facet_wrap for cleaner layout
+  labs(
+    title = "",
+    x = "Metastatic Potential",
+    y = "Weighted CD"
+  ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    strip.background = element_rect(fill = "white", color = "darkgrey"), # Add borders around facet labels
+    panel.border = element_rect(color = "darkgrey", fill = NA, size = 2), # Add black borders around panels
+    axis.text.x = element_blank(), # Larger x-axis text
+    axis.text.y = element_text(size = 20), # Larger y-axis text
+    axis.title.x = element_text(size = 24), # Larger x-axis title
+    axis.title.y = element_text(size = 24), # Larger y-axis title
+    legend.position = "right",
+    legend.title = element_blank()
+  )
+p
+
+setwd("D:/Dropbox/Master Thesis/Thesis/Figures/Winkler")
+ggsave(filename = "Winkler10x_violin.tiff", width = 12, height = 6, dpi = 1200)
+
+
+
+```
