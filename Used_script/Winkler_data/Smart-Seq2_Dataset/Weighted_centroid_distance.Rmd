@@ -32,22 +32,10 @@ set.seed(43)
 # set working directory
 setwd("D:/Dropbox/Master Thesis/PDX_data")
 
-# load data
-load("D:/Dropbox/Master Thesis/PDX_data/seu_10xv2_PT.RData")
-# fix seurat object
-seu_10xv2_PT@assays$RNA@counts <- as(seu_10xv2_PT@assays$RNA@counts, "dgCMatrix")
-
 load("D:/Dropbox/Master Thesis/PDX_data/seu_ss2.RData")
 ```
 
 ```{r QC}
-
-### 10x
-# filter
-seu_10xv2_PT <- subset(seu_10xv2_PT, subset = n_genes > 250)
-table(seu_10xv2_PT@meta.data[["Tumor_ID_updated"]])
-
-
 ### ss2
 # filter
 seu_ss2 <- subset(seu_ss2, subset = n_genes > 250)
