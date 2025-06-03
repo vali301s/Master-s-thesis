@@ -1,4 +1,4 @@
-### Figure 9D + 10B
+### Figure 9CD + 10B
 
 ---
 title: "Centroid_dist_Winkler_optPCs"
@@ -100,7 +100,7 @@ CalculateCentroidDistance <- function(PCs, withSD = NULL, SDs = NULL){
 }
 ```
 
-Centroid distances of Normals with/without variance weighting
+Centroid distances of Normals with
 
 ```{r 10x, fig.height=4, fig.width=8}
 
